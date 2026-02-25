@@ -4,9 +4,9 @@ import re
 if len(sys.argv) != 2:
     raise Exception()
 
-s = re.sub(r"\s+", "", sys.argv[1])  
+s = sys.argv[1]
 
-if not re.fullmatch(r"\d+(?:[+-]\d+)*", s):
+if not re.fullmatch(r"\s*\d+(?:\s*[+-]\s*\d+)*\s*", s):
     raise Exception()
 
 nums = list(map(int, re.findall(r"\d+", s)))
