@@ -1,33 +1,34 @@
-from dataclasses import dataclass
+import sys
 
 
-@dataclass
 class Token:
-    type: str          # "INT" | "PLUS" | "MINUS" | "EOF"
-    value: int | str   # int para INT, str para os demais (ex: "+", "-", "")
+    def __init__(self, type_, value):
+        # atributos exigidos: type (string) e value (int|string)
+        self.type = type_
+        self.value = value
 
 
 class Lexer:
     def __init__(self, source: str):
+        # atributos exigidos: source (string), position (int), next (Token)
         self.source = source
-        self.position = 0   # índice no source
-        self.next = None    # Token mais recente separado
+        self.position = 0
+        self.next = Token("EOF", "")  # placeholder
 
     def select_next(self) -> None:
         s = self.source
 
-        # 1) Ignora espaços em branco
+        # ignora espaços
         while self.position < len(s) and s[self.position].isspace():
             self.position += 1
 
-        # 2) EOF
+        # EOF
         if self.position >= len(s):
             self.next = Token("EOF", "")
             return
 
         ch = s[self.position]
 
-        # 3) Operadores
         if ch == "+":
             self.position += 1
             self.next = Token("PLUS", "+")
@@ -38,7 +39,6 @@ class Lexer:
             self.next = Token("MINUS", "-")
             return
 
-        # Int
         if ch.isdigit():
             start = self.position
             while self.position < len(s) and s[self.position].isdigit():
@@ -47,56 +47,63 @@ class Lexer:
             self.next = Token("INT", int(number_str))
             return
 
+
         raise ValueError(f"[Lexer] Invalid symbol '{ch}' at position {self.position}")
+
+    def selectNext(self) -> None:
+        self.select_next()
 
 
 class Parser:
-    lexer: Lexer | None = None
+    lexer = None | None
 
     @staticmethod
     def parse_expression() -> int:
-        # Espera começar com INT
         if Parser.lexer is None:
             raise RuntimeError("[Parser] Lexer not initialized")
 
+        # EXPR := INT ((PLUS|MINUS) INT)*
         if Parser.lexer.next.type != "INT":
             raise ValueError(f"[Parser] Expected INT, got {Parser.lexer.next.type}")
 
-        result = Parser.lexer.next.value  # int
-        Parser.lexer.select_next()
+        result = Parser.lexer.next.value
+        Parser.lexer.selectNext()
 
-        # Enquanto houver + ou -
         while Parser.lexer.next.type in ("PLUS", "MINUS"):
             op = Parser.lexer.next.type
-            Parser.lexer.select_next()
+            Parser.lexer.selectNext()
 
             if Parser.lexer.next.type != "INT":
                 raise ValueError(f"[Parser] Expected INT after {op}, got {Parser.lexer.next.type}")
 
             if op == "PLUS":
                 result += Parser.lexer.next.value
-            else:  # "MINUS"
+            else:  # MINUS
                 result -= Parser.lexer.next.value
 
-            Parser.lexer.select_next()
+            Parser.lexer.selectNext()
 
         return result
 
     @staticmethod
     def run(code: str) -> int:
         Parser.lexer = Lexer(code)
-        Parser.lexer.select_next()
+        Parser.lexer.selectNext()
 
         result = Parser.parse_expression()
 
         if Parser.lexer.next.type != "EOF":
-            raise ValueError(f"[Parser] Unexpected token {Parser.lexer.next.type} after expression")
+            raise ValueError(f"[Parser] Unexpected token {Parser.lexer.next.type}")
 
         return result
 
+    @staticmethod
+    def parseExpression() -> int:
+        return Parser.parse_expression()
+
 
 def main():
-    code = input().strip("\n")
+    code = sys.argv[1] if len(sys.argv) > 1 else input()
     try:
         print(Parser.run(code))
     except Exception as e:
