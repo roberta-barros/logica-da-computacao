@@ -27,19 +27,23 @@ class Lexer:
 
         ch = s[self.position]
 
-        # PLUS
+        # Operadores
         if ch == "+":
             self.position += 1
             self.next = Token("PLUS", "+")
             return
 
-        # MINUS
         if ch == "-":
             self.position += 1
             self.next = Token("MINUS", "-")
             return
 
-        # INT
+        if ch == "^":
+            self.position += 1
+            self.next = Token("XOR", "^")
+            return
+
+        # INT (múltiplos dígitos)
         if ch.isdigit():
             num = ""
             while self.position < len(s) and s[self.position].isdigit():
@@ -48,6 +52,7 @@ class Lexer:
             self.next = Token("INT", int(num))
             return
 
+        # Símbolo inválido
         raise ValueError(f"[Lexer] Invalid symbol '{ch}' at position {self.position}")
 
 
@@ -59,24 +64,27 @@ class Parser:
         if Parser.lexer is None:
             raise RuntimeError("[Parser] Lexer not initialized")
 
-        # EXPR := INT ((PLUS|MINUS) INT)*
         if Parser.lexer.next.type != "INT":
             raise ValueError(f"[Parser] Expected INT, got {Parser.lexer.next.type}")
 
         result = Parser.lexer.next.value
         Parser.lexer.select_next()
 
-        while Parser.lexer.next.type in ("PLUS", "MINUS"):
+        # EXPR := INT ((PLUS|MINUS|XOR) INT)*
+        while Parser.lexer.next.type in ("PLUS", "MINUS", "XOR"):
             op = Parser.lexer.next.type
             Parser.lexer.select_next()
 
             if Parser.lexer.next.type != "INT":
                 raise ValueError(f"[Parser] Expected INT after {op}, got {Parser.lexer.next.type}")
 
+            value = Parser.lexer.next.value
             if op == "PLUS":
-                result += Parser.lexer.next.value
-            else:  # MINUS
-                result -= Parser.lexer.next.value
+                result += value
+            elif op == "MINUS":
+                result -= value
+            else:  # XOR
+                result ^= value  # XOR bitwise em Python
 
             Parser.lexer.select_next()
 
@@ -101,7 +109,8 @@ def main():
         print(Parser.run(code))
     except Exception as e:
         print(e)
-        sys.exit(1)  
+        sys.exit(1)  # importante pro tester: erro => exit != 0
+
 
 if __name__ == "__main__":
     main()
