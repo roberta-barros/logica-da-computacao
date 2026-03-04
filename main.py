@@ -13,10 +13,10 @@ class Lexer:
         self.position = 0
         self.next = Token("EOF", "")
 
-    def selectNext(self) -> None:
+    def select_next(self) -> None:
         s = self.source
 
-        # Ignorar espaços em branco
+        # Ignora espaços em branco
         while self.position < len(s) and s[self.position].isspace():
             self.position += 1
 
@@ -39,7 +39,7 @@ class Lexer:
             self.next = Token("MINUS", "-")
             return
 
-        # INT (pode ter vários dígitos)
+        # INT
         if ch.isdigit():
             num = ""
             while self.position < len(s) and s[self.position].isdigit():
@@ -48,7 +48,6 @@ class Lexer:
             self.next = Token("INT", int(num))
             return
 
-        # Símbolo inválido
         raise ValueError(f"[Lexer] Invalid symbol '{ch}' at position {self.position}")
 
 
@@ -56,52 +55,39 @@ class Parser:
     lexer = None  # atributo estático
 
     @staticmethod
-    def parseExpression() -> int:
+    def parse_expression() -> int:
         if Parser.lexer is None:
             raise RuntimeError("[Parser] Lexer not initialized")
 
-        # Se o next token não é um número, ERRO
+        # EXPR := INT ((PLUS|MINUS) INT)*
         if Parser.lexer.next.type != "INT":
             raise ValueError(f"[Parser] Expected INT, got {Parser.lexer.next.type}")
 
-        # Resultado recebe o valor do next token INT
         result = Parser.lexer.next.value
+        Parser.lexer.select_next()
 
-        # Posicione no próximo token
-        Parser.lexer.selectNext()
-
-        # Enquanto o next token for PLUS ou MINUS
         while Parser.lexer.next.type in ("PLUS", "MINUS"):
             op = Parser.lexer.next.type
+            Parser.lexer.select_next()
 
-            # Posicione no próximo token
-            Parser.lexer.selectNext()
-
-            # Se o next token não é um número, ERRO
             if Parser.lexer.next.type != "INT":
                 raise ValueError(f"[Parser] Expected INT after {op}, got {Parser.lexer.next.type}")
 
-            # Atualize o resultado conforme a operação indicada
             if op == "PLUS":
                 result += Parser.lexer.next.value
             else:  # MINUS
                 result -= Parser.lexer.next.value
 
-            # Posicione no próximo token
-            Parser.lexer.selectNext()
+            Parser.lexer.select_next()
 
-        # retorne o resultado
         return result
 
     @staticmethod
     def run(code: str) -> int:
         Parser.lexer = Lexer(code)
+        Parser.lexer.select_next()
 
-        # posiciona no primeiro token
-        Parser.lexer.selectNext()
-
-        # parseia expressão
-        result = Parser.parseExpression()
+        result = Parser.parse_expression()
 
         if Parser.lexer.next.type != "EOF":
             raise ValueError(f"[Parser] Unexpected token {Parser.lexer.next.type}")
