@@ -53,6 +53,8 @@ class BinOp(Node):
         elif self.value == "*":
             return left_val * right_val
         elif self.value == "/":
+            if right_val == 0:
+                raise ValueError("[Semantic] Division by zero")
             return int(left_val / right_val)
         raise ValueError(f"[Semantic] Unknown binary operator '{self.value}'")
 
