@@ -16,18 +16,15 @@ class Lexer:
     def select_next(self) -> None:
         s = self.source
 
-        # Ignora espaços em branco
         while self.position < len(s) and s[self.position].isspace():
             self.position += 1
 
-        # EOF
         if self.position >= len(s):
             self.next = Token("EOF", "")
             return
 
         ch = s[self.position]
 
-        # Operadores
         if ch == "+":
             self.position += 1
             self.next = Token("PLUS", "+")
@@ -38,12 +35,26 @@ class Lexer:
             self.next = Token("MINUS", "-")
             return
 
-        if ch == "^":
+        if ch == "*":
             self.position += 1
-            self.next = Token("XOR", "^")
+            self.next = Token("MULT", "*")
             return
 
-        # INT (múltiplos dígitos)
+        if ch == "/":
+            self.position += 1
+            self.next = Token("DIV", "/")
+            return
+
+        if ch == "(":
+            self.position += 1
+            self.next = Token("OPEN_PAR", "(")
+            return
+
+        if ch == ")":
+            self.position += 1
+            self.next = Token("CLOSE_PAR", ")")
+            return
+
         if ch.isdigit():
             num = ""
             while self.position < len(s) and s[self.position].isdigit():
@@ -52,41 +63,64 @@ class Lexer:
             self.next = Token("INT", int(num))
             return
 
-        # Símbolo inválido
         raise ValueError(f"[Lexer] Invalid symbol '{ch}' at position {self.position}")
 
 
 class Parser:
-    lexer = None  # atributo estático
+    lexer = None
+
+    @staticmethod
+    def parse_factor() -> int:
+        if Parser.lexer.next.type == "INT":
+            result = Parser.lexer.next.value
+            Parser.lexer.select_next()
+            return result
+
+        if Parser.lexer.next.type == "PLUS":
+            Parser.lexer.select_next()
+            return +Parser.parse_factor()
+
+        if Parser.lexer.next.type == "MINUS":
+            Parser.lexer.select_next()
+            return -Parser.parse_factor()
+
+        if Parser.lexer.next.type == "OPEN_PAR":
+            Parser.lexer.select_next()
+            result = Parser.parse_expression()
+            if Parser.lexer.next.type != "CLOSE_PAR":
+                raise ValueError(f"[Parser] Expected ')', got {Parser.lexer.next.type}")
+            Parser.lexer.select_next()
+            return result
+
+        raise ValueError(f"[Parser] Unexpected token {Parser.lexer.next.type}")
+
+    @staticmethod
+    def parse_term() -> int:
+        result = Parser.parse_factor()
+
+        while Parser.lexer.next.type in ("MULT", "DIV"):
+            op = Parser.lexer.next.type
+            Parser.lexer.select_next()
+            value = Parser.parse_factor()
+            if op == "MULT":
+                result *= value
+            else:
+                result = int(result / value)  # divisão inteira truncando para zero
+
+        return result
 
     @staticmethod
     def parse_expression() -> int:
-        if Parser.lexer is None:
-            raise RuntimeError("[Parser] Lexer not initialized")
+        result = Parser.parse_term()
 
-        if Parser.lexer.next.type != "INT":
-            raise ValueError(f"[Parser] Expected INT, got {Parser.lexer.next.type}")
-
-        result = Parser.lexer.next.value
-        Parser.lexer.select_next()
-
-        # EXPR := INT ((PLUS|MINUS|XOR) INT)*
-        while Parser.lexer.next.type in ("PLUS", "MINUS", "XOR"):
+        while Parser.lexer.next.type in ("PLUS", "MINUS"):
             op = Parser.lexer.next.type
             Parser.lexer.select_next()
-
-            if Parser.lexer.next.type != "INT":
-                raise ValueError(f"[Parser] Expected INT after {op}, got {Parser.lexer.next.type}")
-
-            value = Parser.lexer.next.value
+            value = Parser.parse_term()
             if op == "PLUS":
                 result += value
-            elif op == "MINUS":
+            else:
                 result -= value
-            else:  # XOR
-                result ^= value  # XOR bitwise em Python
-
-            Parser.lexer.select_next()
 
         return result
 
@@ -109,7 +143,7 @@ def main():
         print(Parser.run(code))
     except Exception as e:
         print(e)
-        sys.exit(1)  # importante pro tester: erro => exit != 0
+        sys.exit(1)
 
 
 if __name__ == "__main__":
