@@ -9,9 +9,9 @@ class Token:
 
 
 class Node(ABC):
-    def __init__(self, value, children=None):
+    def __init__(self, value, children):
         self.value = value
-        self.children = children if children is not None else []
+        self.children = children
 
     @abstractmethod
     def evaluate(self) -> int:
@@ -19,16 +19,16 @@ class Node(ABC):
 
 
 class IntVal(Node):
-    def __init__(self, value):
-        super().__init__(value, [])
+    def __init__(self, value, children=None):
+        super().__init__(value, children if children is not None else [])
 
     def evaluate(self) -> int:
         return self.value
 
 
 class UnOp(Node):
-    def __init__(self, op, child):
-        super().__init__(op, [child])
+    def __init__(self, value, children=None):
+        super().__init__(value, children if children is not None else [])
 
     def evaluate(self) -> int:
         child_val = self.children[0].evaluate()
@@ -40,8 +40,8 @@ class UnOp(Node):
 
 
 class BinOp(Node):
-    def __init__(self, op, left, right):
-        super().__init__(op, [left, right])
+    def __init__(self, value, children=None):
+        super().__init__(value, children if children is not None else [])
 
     def evaluate(self) -> int:
         left_val = self.children[0].evaluate()
@@ -125,7 +125,7 @@ class Parser:
             op = Parser.lexer.next.value
             Parser.lexer.select_next()
             child = Parser.parse_factor()
-            return UnOp(op, child)
+            return UnOp(op, [child])
 
         if Parser.lexer.next.type == "OPEN_PAR":
             Parser.lexer.select_next()
@@ -145,7 +145,7 @@ class Parser:
             op = Parser.lexer.next.value
             Parser.lexer.select_next()
             right = Parser.parse_factor()
-            result = BinOp(op, result, right)
+            result = BinOp(op, [result, right])
 
         return result
 
@@ -157,7 +157,7 @@ class Parser:
             op = Parser.lexer.next.value
             Parser.lexer.select_next()
             right = Parser.parse_term()
-            result = BinOp(op, result, right)
+            result = BinOp(op, [result, right])
 
         return result
 
