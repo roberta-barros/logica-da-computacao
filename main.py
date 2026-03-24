@@ -26,12 +26,12 @@ class SymbolTable:
     def __init__(self):
         self.table: dict = {}
 
-    def get(self, name: str) -> Variable:
+    def get_value(self, name: str) -> Variable:
         if name not in self.table:
             raise ValueError(f"[Semantic] Variable '{name}' not declared")
         return self.table[name]
 
-    def set(self, name: str, variable: Variable) -> None:
+    def set_value(self, name: str, variable: Variable) -> None:
         self.table[name] = variable
 
 
@@ -92,7 +92,7 @@ class Identifier(Node):
         super().__init__(value, children if children is not None else [])
 
     def evaluate(self, st: SymbolTable) -> int:
-        return st.get(self.value).value
+        return st.get_value(self.value).value
 
 
 class Assignment(Node):
@@ -107,7 +107,7 @@ class Assignment(Node):
     def evaluate(self, st: SymbolTable) -> None:
         var_name = self.children[0].value  # nome da variável (string)
         var_value = self.children[1].evaluate(st)  # calcula a expressão
-        st.set(var_name, Variable(var_value))
+        st.set_value(var_name, Variable(var_value))
 
 
 class Print(Node):
