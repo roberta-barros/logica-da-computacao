@@ -493,6 +493,19 @@ class Parser:
             Parser.lexer.select_next()                      # consome 'end'
             return While("while", [cond, body])
 
+        # do BLOCK end
+        if token.type == "OPEN_BRA":
+            Parser.lexer.select_next()                      # consome 'do'
+            while Parser.lexer.next.type == "EOL":
+                Parser.lexer.select_next()
+            body = Parser.parse_block()
+            if Parser.lexer.next.type != "CLOSE_BRA":
+                raise ValueError(
+                    f"[Parser] Expected 'end' to close block, got {Parser.lexer.next.type}"
+                )
+            Parser.lexer.select_next()                      # consome 'end'
+            return body
+
         # IDENTIFIER = BEXPR
         if token.type == "IDEN":
             iden_node = Identifier(token.value)
@@ -558,5 +571,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(e)
+        print(e, file=sys.stderr)
         sys.exit(1)
