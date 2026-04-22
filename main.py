@@ -22,6 +22,7 @@ class Variable:
         self.type = type_
 
 
+
 class SymbolTable:
     def __init__(self):
         self.table: dict[str, Variable] = {}
@@ -117,9 +118,14 @@ class BinOp(Node):
         if self.value == "+":
             if left.type == right.type == "number":
                 return Variable(left.value + right.value, "number")
-            if left.type == right.type == "string":
-                return Variable(left.value + right.value, "string")
-            raise ValueError("[Semantic] Operator '+' expects number+number or string+string")
+            raise ValueError("[Semantic] Operator '+' expects number+number")
+
+        if self.value == "..":
+            def to_string(variable: Variable) -> str:
+                if variable.type == "boolean":
+                    return "true" if variable.value else "false"
+                return str(variable.value)
+            return Variable(to_string(left) + to_string(right), "string")
 
         if self.value == "-":
             if left.type == right.type == "number":
@@ -146,12 +152,16 @@ class BinOp(Node):
         if self.value == ">":
             if left.type == right.type == "number":
                 return Variable(left.value > right.value, "boolean")
-            raise ValueError("[Semantic] Operator '>' expects number>number")
+            if left.type == right.type == "string":
+                return Variable(left.value > right.value, "boolean")
+            raise ValueError("[Semantic] Operator '>' expects number>number or string>string")
 
         if self.value == "<":
             if left.type == right.type == "number":
                 return Variable(left.value < right.value, "boolean")
-            raise ValueError("[Semantic] Operator '<' expects number<number")
+            if left.type == right.type == "string":
+                return Variable(left.value < right.value, "boolean")
+            raise ValueError("[Semantic] Operator '<' expects number<number or string<string")
 
         if self.value == "and":
             if left.type == right.type == "boolean":
@@ -327,6 +337,14 @@ class Lexer:
             self.next = Token("STR", string_value)
             return
 
+        if ch == ".":
+            self.position += 1
+            if self.position < len(s) and s[self.position] == ".":
+                self.position += 1
+                self.next = Token("CONCAT", "..")
+                return
+            raise ValueError(f"[Lexer] Invalid symbol '.' at position {self.position - 1}")
+
         if ch == ":":
             self.position += 1
             self.next = Token("COLON", ":")
@@ -469,7 +487,7 @@ class Parser:
     @staticmethod
     def parse_expression() -> Node:
         result = Parser.parse_term()
-        while Parser.lexer.next.type in ("PLUS", "MINUS"):
+        while Parser.lexer.next.type in ("PLUS", "MINUS", "CONCAT"):
             op = Parser.lexer.next.value
             Parser.lexer.select_next()
             result = BinOp(op, [result, Parser.parse_term()])
