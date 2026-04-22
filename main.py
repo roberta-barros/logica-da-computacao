@@ -21,9 +21,6 @@ class Variable:
         self.value = value
         self.type = type_
 
-    def copy(self):
-        return Variable(self.value, self.type)
-
 
 class SymbolTable:
     def __init__(self):
@@ -35,7 +32,7 @@ class SymbolTable:
         variable = self.table[name]
         if variable.value is None:
             raise ValueError(f"[Semantic] Variable '{name}' declared but not assigned")
-        return variable.copy()
+        return Variable(variable.value, variable.type)
 
     def create_variable(self, name: str, type_: str) -> None:
         if name in self.table:
