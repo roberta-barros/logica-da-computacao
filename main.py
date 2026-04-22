@@ -17,21 +17,41 @@ class PrePro:
 
 
 class Variable:
-    def __init__(self, value: int):
+    def __init__(self, value, type_):
         self.value = value
+        self.type = type_
+
+    def copy(self):
+        return Variable(self.value, self.type)
 
 
 class SymbolTable:
     def __init__(self):
-        self.table: dict = {}
+        self.table: dict[str, Variable] = {}
 
     def get_value(self, name: str) -> Variable:
         if name not in self.table:
             raise ValueError(f"[Semantic] Variable '{name}' not declared")
-        return self.table[name]
+        variable = self.table[name]
+        if variable.value is None:
+            raise ValueError(f"[Semantic] Variable '{name}' declared but not assigned")
+        return variable.copy()
+
+    def create_variable(self, name: str, type_: str) -> None:
+        if name in self.table:
+            raise ValueError(f"[Semantic] Variable '{name}' already declared")
+        self.table[name] = Variable(None, type_)
 
     def set_value(self, name: str, variable: Variable) -> None:
-        self.table[name] = variable
+        if name not in self.table:
+            raise ValueError(f"[Semantic] Variable '{name}' not declared")
+        current = self.table[name]
+        if current.type != variable.type:
+            raise ValueError(
+                f"[Semantic] Type mismatch in assignment to '{name}': "
+                f"expected {current.type}, got {variable.type}"
+            )
+        current.value = variable.value
 
 
 class Node(ABC):
@@ -48,22 +68,44 @@ class IntVal(Node):
     def __init__(self, value, children=None):
         super().__init__(value, children if children is not None else [])
 
-    def evaluate(self, st: SymbolTable) -> int:
-        return self.value
+    def evaluate(self, st: SymbolTable) -> Variable:
+        return Variable(self.value, "number")
+
+
+class BoolVal(Node):
+    def __init__(self, value, children=None):
+        super().__init__(value, children if children is not None else [])
+
+    def evaluate(self, st: SymbolTable) -> Variable:
+        return Variable(self.value, "boolean")
+
+
+class StringVal(Node):
+    def __init__(self, value, children=None):
+        super().__init__(value, children if children is not None else [])
+
+    def evaluate(self, st: SymbolTable) -> Variable:
+        return Variable(self.value, "string")
 
 
 class UnOp(Node):
     def __init__(self, value, children=None):
         super().__init__(value, children if children is not None else [])
 
-    def evaluate(self, st: SymbolTable) -> int:
-        child_val = self.children[0].evaluate(st)
+    def evaluate(self, st: SymbolTable) -> Variable:
+        child = self.children[0].evaluate(st)
         if self.value == "+":
-            return +child_val
+            if child.type != "number":
+                raise ValueError("[Semantic] Unary '+' expects number")
+            return Variable(+child.value, "number")
         if self.value == "-":
-            return -child_val
+            if child.type != "number":
+                raise ValueError("[Semantic] Unary '-' expects number")
+            return Variable(-child.value, "number")
         if self.value == "not":
-            return 1 if child_val == 0 else 0
+            if child.type != "boolean":
+                raise ValueError("[Semantic] Unary 'not' expects boolean")
+            return Variable(not child.value, "boolean")
         raise ValueError(f"[Semantic] Unknown unary operator '{self.value}'")
 
 
@@ -71,29 +113,59 @@ class BinOp(Node):
     def __init__(self, value, children=None):
         super().__init__(value, children if children is not None else [])
 
-    def evaluate(self, st: SymbolTable) -> int:
-        left_val = self.children[0].evaluate(st)
-        right_val = self.children[1].evaluate(st)
+    def evaluate(self, st: SymbolTable) -> Variable:
+        left = self.children[0].evaluate(st)
+        right = self.children[1].evaluate(st)
+
         if self.value == "+":
-            return left_val + right_val
+            if left.type == right.type == "number":
+                return Variable(left.value + right.value, "number")
+            if left.type == right.type == "string":
+                return Variable(left.value + right.value, "string")
+            raise ValueError("[Semantic] Operator '+' expects number+number or string+string")
+
         if self.value == "-":
-            return left_val - right_val
+            if left.type == right.type == "number":
+                return Variable(left.value - right.value, "number")
+            raise ValueError("[Semantic] Operator '-' expects number-number")
+
         if self.value == "*":
-            return left_val * right_val
+            if left.type == right.type == "number":
+                return Variable(left.value * right.value, "number")
+            raise ValueError("[Semantic] Operator '*' expects number*number")
+
         if self.value == "/":
-            if right_val == 0:
-                raise ValueError("[Semantic] Division by zero")
-            return int(left_val / right_val)
+            if left.type == right.type == "number":
+                if right.value == 0:
+                    raise ValueError("[Semantic] Division by zero")
+                return Variable(int(left.value / right.value), "number")
+            raise ValueError("[Semantic] Operator '/' expects number/number")
+
         if self.value == "==":
-            return 1 if left_val == right_val else 0
+            if left.type != right.type:
+                raise ValueError("[Semantic] Operator '==' expects operands of the same type")
+            return Variable(left.value == right.value, "boolean")
+
         if self.value == ">":
-            return 1 if left_val > right_val else 0
+            if left.type == right.type == "number":
+                return Variable(left.value > right.value, "boolean")
+            raise ValueError("[Semantic] Operator '>' expects number>number")
+
         if self.value == "<":
-            return 1 if left_val < right_val else 0
+            if left.type == right.type == "number":
+                return Variable(left.value < right.value, "boolean")
+            raise ValueError("[Semantic] Operator '<' expects number<number")
+
         if self.value == "and":
-            return 1 if (left_val != 0 and right_val != 0) else 0
+            if left.type == right.type == "boolean":
+                return Variable(left.value and right.value, "boolean")
+            raise ValueError("[Semantic] Operator 'and' expects boolean and boolean")
+
         if self.value == "or":
-            return 1 if (left_val != 0 or right_val != 0) else 0
+            if left.type == right.type == "boolean":
+                return Variable(left.value or right.value, "boolean")
+            raise ValueError("[Semantic] Operator 'or' expects boolean or boolean")
+
         raise ValueError(f"[Semantic] Unknown binary operator '{self.value}'")
 
 
@@ -101,8 +173,8 @@ class Identifier(Node):
     def __init__(self, value, children=None):
         super().__init__(value, children if children is not None else [])
 
-    def evaluate(self, st: SymbolTable) -> int:
-        return st.get_value(self.value).value
+    def evaluate(self, st: SymbolTable) -> Variable:
+        return st.get_value(self.value)
 
 
 class Assignment(Node):
@@ -112,7 +184,18 @@ class Assignment(Node):
     def evaluate(self, st: SymbolTable) -> None:
         var_name = self.children[0].value
         var_value = self.children[1].evaluate(st)
-        st.set_value(var_name, Variable(var_value))
+        st.set_value(var_name, var_value)
+
+
+class VarDec(Node):
+    def __init__(self, value, children=None):
+        super().__init__(value, children if children is not None else [])
+
+    def evaluate(self, st: SymbolTable) -> None:
+        name = self.children[0].value
+        st.create_variable(name, self.value)
+        if len(self.children) > 1:
+            st.set_value(name, self.children[1].evaluate(st))
 
 
 class Print(Node):
@@ -121,15 +204,25 @@ class Print(Node):
 
     def evaluate(self, st: SymbolTable) -> None:
         result = self.children[0].evaluate(st)
-        print(result)
+        if result.type == "boolean":
+            print("true" if result.value else "false")
+        else:
+            print(result.value)
 
 
 class Read(Node):
     def __init__(self, value="read", children=None):
         super().__init__(value, children if children is not None else [])
 
-    def evaluate(self, st: SymbolTable) -> int:
-        return int(input().strip())
+    def evaluate(self, st: SymbolTable) -> Variable:
+        raw = input()
+        if re.fullmatch(r"[+-]?\d+", raw):
+            return Variable(int(raw), "number")
+        if raw == "true":
+            return Variable(True, "boolean")
+        if raw == "false":
+            return Variable(False, "boolean")
+        return Variable(raw, "string")
 
 
 class If(Node):
@@ -138,7 +231,10 @@ class If(Node):
         super().__init__(value, children if children is not None else [])
 
     def evaluate(self, st: SymbolTable) -> None:
-        if self.children[0].evaluate(st) != 0:
+        cond = self.children[0].evaluate(st)
+        if cond.type != "boolean":
+            raise ValueError("[Semantic] If condition must be boolean")
+        if cond.value:
             self.children[1].evaluate(st)
         elif len(self.children) > 2:
             self.children[2].evaluate(st)
@@ -150,7 +246,12 @@ class While(Node):
         super().__init__(value, children if children is not None else [])
 
     def evaluate(self, st: SymbolTable) -> None:
-        while self.children[0].evaluate(st) != 0:
+        while True:
+            cond = self.children[0].evaluate(st)
+            if cond.type != "boolean":
+                raise ValueError("[Semantic] While condition must be boolean")
+            if not cond.value:
+                break
             self.children[1].evaluate(st)
 
 
@@ -173,16 +274,22 @@ class NoOp(Node):
 
 RESERVED_WORDS = {
     "print": "PRINT",
-    "if":    "IF",
-    "else":  "ELSE",
+    "if": "IF",
+    "else": "ELSE",
     "while": "WHILE",
-    "then":  "OPEN_IF_BRA",
-    "do":    "OPEN_BRA",
-    "end":   "CLOSE_BRA",
-    "read":  "READ",
-    "and":   "AND",
-    "or":    "OR",
-    "not":   "NOT",
+    "then": "OPEN_IF_BRA",
+    "do": "OPEN_BRA",
+    "end": "CLOSE_BRA",
+    "read": "READ",
+    "and": "AND",
+    "or": "OR",
+    "not": "NOT",
+    "local": "VAR",
+    "true": "BOOL",
+    "false": "BOOL",
+    "string": "TYPE",
+    "number": "TYPE",
+    "boolean": "TYPE",
 }
 
 
@@ -207,6 +314,25 @@ class Lexer:
         if ch == "\n":
             self.position += 1
             self.next = Token("EOL", "\\n")
+            return
+
+        if ch == '"':
+            self.position += 1
+            string_value = ""
+            while self.position < len(s) and s[self.position] != '"':
+                if s[self.position] == "\n":
+                    raise ValueError("[Lexer] Unterminated string literal")
+                string_value += s[self.position]
+                self.position += 1
+            if self.position >= len(s):
+                raise ValueError("[Lexer] Unterminated string literal")
+            self.position += 1
+            self.next = Token("STR", string_value)
+            return
+
+        if ch == ":":
+            self.position += 1
+            self.next = Token("COLON", ":")
             return
 
         if ch == "+":
@@ -279,13 +405,22 @@ class Lexer:
 class Parser:
     lexer = None
 
-    # ------------------------------------------------------------------ FACTOR
     @staticmethod
     def parse_factor() -> Node:
         token = Parser.lexer.next
 
         if token.type == "INT":
             node = IntVal(token.value)
+            Parser.lexer.select_next()
+            return node
+
+        if token.type == "BOOL":
+            node = BoolVal(token.value == "true")
+            Parser.lexer.select_next()
+            return node
+
+        if token.type == "STR":
+            node = StringVal(token.value)
             Parser.lexer.select_next()
             return node
 
@@ -325,7 +460,6 @@ class Parser:
 
         raise ValueError(f"[Parser] Unexpected token in factor: {token.type}")
 
-    # ------------------------------------------------------------------- TERM
     @staticmethod
     def parse_term() -> Node:
         result = Parser.parse_factor()
@@ -335,7 +469,6 @@ class Parser:
             result = BinOp(op, [result, Parser.parse_factor()])
         return result
 
-    # --------------------------------------------------------------- EXPRESSION
     @staticmethod
     def parse_expression() -> Node:
         result = Parser.parse_term()
@@ -345,7 +478,6 @@ class Parser:
             result = BinOp(op, [result, Parser.parse_term()])
         return result
 
-    # --------------------------------------------------------- REL EXPRESSION
     @staticmethod
     def parse_rel_expression() -> Node:
         result = Parser.parse_expression()
@@ -355,37 +487,27 @@ class Parser:
             result = BinOp(op, [result, Parser.parse_expression()])
         return result
 
-    # ---------------------------------------------------------- BOOL TERM (and)
     @staticmethod
     def parse_bool_term() -> Node:
         result = Parser.parse_rel_expression()
         while Parser.lexer.next.type == "AND":
-            op = Parser.lexer.next.value          # "and"
+            op = Parser.lexer.next.value
             Parser.lexer.select_next()
             result = BinOp(op, [result, Parser.parse_rel_expression()])
         return result
 
-    # ------------------------------------------------------- BOOL EXPRESSION (or)
     @staticmethod
     def parse_bool_expression() -> Node:
         result = Parser.parse_bool_term()
         while Parser.lexer.next.type == "OR":
-            op = Parser.lexer.next.value          # "or"
+            op = Parser.lexer.next.value
             Parser.lexer.select_next()
             result = BinOp(op, [result, Parser.parse_bool_term()])
         return result
 
-    # ------------------------------------------------------------------ BLOCK
     @staticmethod
     def parse_block() -> Node:
-        """
-        Análogo ao parseBlock() da linguagem C (que consumia '{' stmts '}').
-        Para a sintaxe Lua, a abertura ('then'/'do') e o fechamento ('end')
-        são consumidos pelo parse_statement; parse_block só organiza as
-        statements internas até encontrar CLOSE_BRA ('end') ou ELSE.
-        """
         stmts = []
-        # Pula newlines iniciais dentro do bloco
         while Parser.lexer.next.type == "EOL":
             Parser.lexer.select_next()
 
@@ -397,21 +519,17 @@ class Parser:
                     Parser.lexer.select_next()
             elif Parser.lexer.next.type not in ("CLOSE_BRA", "ELSE", "EOF"):
                 raise ValueError(
-                    f"[Parser] Expected newline inside block, "
-                    f"got {Parser.lexer.next.type}"
+                    f"[Parser] Expected newline inside block, got {Parser.lexer.next.type}"
                 )
         return Block("block", stmts)
 
-    # --------------------------------------------------------------- STATEMENT
     @staticmethod
     def parse_statement() -> Node:
         token = Parser.lexer.next
 
-        # Linha vazia
         if token.type in ("EOL", "EOF"):
             return NoOp()
 
-        # print ( BEXPR )
         if token.type == "PRINT":
             Parser.lexer.select_next()
             if Parser.lexer.next.type != "OPEN_PAR":
@@ -427,32 +545,31 @@ class Parser:
             Parser.lexer.select_next()
             return Print("print", [expr])
 
-        # if ( BEXPR ) then BLOCK [else BLOCK] end
         if token.type == "IF":
-            Parser.lexer.select_next()                      # consome 'if'
+            Parser.lexer.select_next()
             if Parser.lexer.next.type != "OPEN_PAR":
                 raise ValueError(
                     f"[Parser] Expected '(' after if, got {Parser.lexer.next.type}"
                 )
-            Parser.lexer.select_next()                      # consome '('
+            Parser.lexer.select_next()
             cond = Parser.parse_bool_expression()
             if Parser.lexer.next.type != "CLOSE_PAR":
                 raise ValueError(
                     f"[Parser] Expected ')' after if cond, got {Parser.lexer.next.type}"
                 )
-            Parser.lexer.select_next()                      # consome ')'
+            Parser.lexer.select_next()
             if Parser.lexer.next.type != "OPEN_IF_BRA":
                 raise ValueError(
                     f"[Parser] Expected 'then', got {Parser.lexer.next.type}"
                 )
-            Parser.lexer.select_next()                      # consome 'then'
+            Parser.lexer.select_next()
             while Parser.lexer.next.type == "EOL":
                 Parser.lexer.select_next()
             if_block = Parser.parse_block()
 
             children = [cond, if_block]
             if Parser.lexer.next.type == "ELSE":
-                Parser.lexer.select_next()                  # consome 'else'
+                Parser.lexer.select_next()
                 while Parser.lexer.next.type == "EOL":
                     Parser.lexer.select_next()
                 children.append(Parser.parse_block())
@@ -461,28 +578,27 @@ class Parser:
                 raise ValueError(
                     f"[Parser] Expected 'end' to close if, got {Parser.lexer.next.type}"
                 )
-            Parser.lexer.select_next()                      # consome 'end'
+            Parser.lexer.select_next()
             return If("if", children)
 
-        # while ( BEXPR ) do BLOCK end
         if token.type == "WHILE":
-            Parser.lexer.select_next()                      # consome 'while'
+            Parser.lexer.select_next()
             if Parser.lexer.next.type != "OPEN_PAR":
                 raise ValueError(
                     f"[Parser] Expected '(' after while, got {Parser.lexer.next.type}"
                 )
-            Parser.lexer.select_next()                      # consome '('
+            Parser.lexer.select_next()
             cond = Parser.parse_bool_expression()
             if Parser.lexer.next.type != "CLOSE_PAR":
                 raise ValueError(
                     f"[Parser] Expected ')' after while cond, got {Parser.lexer.next.type}"
                 )
-            Parser.lexer.select_next()                      # consome ')'
+            Parser.lexer.select_next()
             if Parser.lexer.next.type != "OPEN_BRA":
                 raise ValueError(
                     f"[Parser] Expected 'do', got {Parser.lexer.next.type}"
                 )
-            Parser.lexer.select_next()                      # consome 'do'
+            Parser.lexer.select_next()
             while Parser.lexer.next.type == "EOL":
                 Parser.lexer.select_next()
             body = Parser.parse_block()
@@ -490,12 +606,11 @@ class Parser:
                 raise ValueError(
                     f"[Parser] Expected 'end' to close while, got {Parser.lexer.next.type}"
                 )
-            Parser.lexer.select_next()                      # consome 'end'
+            Parser.lexer.select_next()
             return While("while", [cond, body])
 
-        # do BLOCK end
         if token.type == "OPEN_BRA":
-            Parser.lexer.select_next()                      # consome 'do'
+            Parser.lexer.select_next()
             while Parser.lexer.next.type == "EOL":
                 Parser.lexer.select_next()
             body = Parser.parse_block()
@@ -503,10 +618,37 @@ class Parser:
                 raise ValueError(
                     f"[Parser] Expected 'end' to close block, got {Parser.lexer.next.type}"
                 )
-            Parser.lexer.select_next()                      # consome 'end'
+            Parser.lexer.select_next()
             return body
 
-        # IDENTIFIER = BEXPR
+        if token.type == "VAR":
+            Parser.lexer.select_next()
+            if Parser.lexer.next.type != "IDEN":
+                raise ValueError(
+                    f"[Parser] Expected identifier after local, got {Parser.lexer.next.type}"
+                )
+            iden_node = Identifier(Parser.lexer.next.value)
+            Parser.lexer.select_next()
+
+            # Aceita 'local x number', 'local x: number' e 'local x::number'
+            if Parser.lexer.next.type == "COLON":
+                Parser.lexer.select_next()
+                if Parser.lexer.next.type == "COLON":
+                    Parser.lexer.select_next()
+
+            if Parser.lexer.next.type != "TYPE":
+                raise ValueError(
+                    f"[Parser] Expected type after variable name, got {Parser.lexer.next.type}"
+                )
+            var_type = Parser.lexer.next.value
+            Parser.lexer.select_next()
+
+            children = [iden_node]
+            if Parser.lexer.next.type == "ASSIGN":
+                Parser.lexer.select_next()
+                children.append(Parser.parse_bool_expression())
+            return VarDec(var_type, children)
+
         if token.type == "IDEN":
             iden_node = Identifier(token.value)
             Parser.lexer.select_next()
@@ -519,7 +661,6 @@ class Parser:
 
         raise ValueError(f"[Parser] Unexpected token in statement: {token.type}")
 
-    # --------------------------------------------------------------- PROGRAM
     @staticmethod
     def parse_program() -> Node:
         statements = []
