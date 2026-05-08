@@ -287,6 +287,10 @@ class For(Node):
             block.evaluate(st)
             current += 1
 
+        # After an inclusive for, the control variable keeps the first value
+        # outside the interval. Example: for i = 0, n do ... end leaves i == n + 1.
+        st.set(identifier, current)
+
 
 class Block(Node):
     def evaluate(self, st: SymbolTable):
