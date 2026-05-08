@@ -53,7 +53,22 @@ class SymbolTable:
 
 
 class PrePro:
-    RESERVED_WORDS = {"print", "const", "imut"}
+    RESERVED_WORDS = {
+        "print",
+        "const",
+        "imut",
+        "if",
+        "then",
+        "else",
+        "while",
+        "do",
+        "end",
+        "and",
+        "or",
+        "not",
+        "read",
+        "for",
+    }
     IDENTIFIER_RE = r"[A-Za-z][A-Za-z0-9_]*"
 
     @staticmethod
@@ -86,7 +101,7 @@ class PrePro:
                 lines_without_const_declarations.append(raw_line)
                 continue
 
-            if stripped.startswith("const"):
+            if re.match(r"^const\b", stripped):
                 match = re.fullmatch(
                     rf"const\s+({PrePro.IDENTIFIER_RE})\s+([+-]?\d+)\s*",
                     stripped,
@@ -149,6 +164,8 @@ class UnOp(Node):
             return +child_val
         if self.value == "-":
             return -child_val
+        if self.value == "not":
+            return 1 if child_val == 0 else 0
         if self.value == "!":
             if child_val < 0:
                 raise ValueError("[Semantic] Factorial of negative number")
@@ -175,8 +192,32 @@ class BinOp(Node):
             if right_val == 0:
                 raise ValueError("[Semantic] Division by zero")
             return int(left_val / right_val)
+        if self.value == "==":
+            return 1 if left_val == right_val else 0
+        if self.value == ">":
+            return 1 if left_val > right_val else 0
+        if self.value == "<":
+            return 1 if left_val < right_val else 0
+        if self.value == "and":
+            return 1 if left_val != 0 and right_val != 0 else 0
+        if self.value == "or":
+            return 1 if left_val != 0 or right_val != 0 else 0
 
         raise ValueError(f"[Semantic] Unknown binary operator '{self.value}'")
+
+
+class ConditionalExpression(Node):
+    """Extra credit: if-expression / ternary conditional.
+
+    Syntax:
+        if condition then true_expression else false_expression end
+    """
+
+    def evaluate(self, st: SymbolTable) -> int:
+        condition = self.children[0].evaluate(st)
+        if condition != 0:
+            return self.children[1].evaluate(st)
+        return self.children[2].evaluate(st)
 
 
 class Assignment(Node):
@@ -198,6 +239,55 @@ class Print(Node):
         print(self.children[0].evaluate(st))
 
 
+class Read(Node):
+    def evaluate(self, st: SymbolTable) -> int:
+        try:
+            return int(input())
+        except EOFError as exc:
+            raise ValueError("[Semantic] Expected integer input for read()") from exc
+        except ValueError as exc:
+            raise ValueError("[Semantic] read() expects an integer") from exc
+
+
+class If(Node):
+    def evaluate(self, st: SymbolTable):
+        condition = self.children[0].evaluate(st)
+        if condition != 0:
+            self.children[1].evaluate(st)
+        elif len(self.children) == 3:
+            self.children[2].evaluate(st)
+
+
+class While(Node):
+    def evaluate(self, st: SymbolTable):
+        while self.children[0].evaluate(st) != 0:
+            self.children[1].evaluate(st)
+
+
+class For(Node):
+    """Extra credit: inclusive for loop.
+
+    Syntax:
+        for i = start_expression, end_expression do
+            statement
+        end
+
+    The final value is included, as requested by the roteiro.
+    """
+
+    def evaluate(self, st: SymbolTable):
+        identifier = self.children[0].value
+        start_value = self.children[1].evaluate(st)
+        end_value = self.children[2].evaluate(st)
+        block = self.children[3]
+
+        current = start_value
+        while current <= end_value:
+            st.set(identifier, current)
+            block.evaluate(st)
+            current += 1
+
+
 class Block(Node):
     def evaluate(self, st: SymbolTable):
         for child in self.children:
@@ -214,6 +304,17 @@ class Lexer:
         "print": "PRINT",
         "imut": "IMUT",
         "const": "CONST",
+        "if": "IF",
+        "then": "OPEN_IF_BRA",
+        "else": "ELSE",
+        "while": "WHILE",
+        "do": "OPEN_BRA",
+        "end": "CLOSE_BRA",
+        "and": "AND",
+        "or": "OR",
+        "not": "NOT",
+        "read": "READ",
+        "for": "FOR",
     }
 
     def __init__(self, source: str):
@@ -245,9 +346,25 @@ class Lexer:
             self.position += 1
             self.next = Token("END", "\n")
             return
+        if ch == "=" and self.position + 1 < len(s) and s[self.position + 1] == "=":
+            self.position += 2
+            self.next = Token("EQ", "==")
+            return
         if ch == "=":
             self.position += 1
             self.next = Token("ASSIGN", "=")
+            return
+        if ch == ">":
+            self.position += 1
+            self.next = Token("GT", ">")
+            return
+        if ch == "<":
+            self.position += 1
+            self.next = Token("LT", "<")
+            return
+        if ch == ",":
+            self.position += 1
+            self.next = Token("COMMA", ",")
             return
         if ch == "+":
             self.position += 1
@@ -309,6 +426,11 @@ class Parser:
         Parser.lexer.select_next()
 
     @staticmethod
+    def skip_end_lines() -> None:
+        while Parser.lexer.next.type == "END":
+            Parser.lexer.select_next()
+
+    @staticmethod
     def parse_primary() -> Node:
         if Parser.lexer.next.type == "INT":
             node = IntVal(Parser.lexer.next.value)
@@ -320,11 +442,28 @@ class Parser:
             Parser.lexer.select_next()
             return node
 
+        if Parser.lexer.next.type == "READ":
+            Parser.lexer.select_next()
+            Parser.expect("OPEN_PAR")
+            Parser.expect("CLOSE_PAR")
+            return Read("read")
+
         if Parser.lexer.next.type == "OPEN_PAR":
             Parser.lexer.select_next()
-            node = Parser.parse_expression()
+            node = Parser.parse_bool_expression()
             Parser.expect("CLOSE_PAR")
             return node
+
+        # Extra credit: if-expression with high precedence, parsed as a factor.
+        if Parser.lexer.next.type == "IF":
+            Parser.lexer.select_next()
+            condition = Parser.parse_bool_expression()
+            Parser.expect("OPEN_IF_BRA")
+            true_expression = Parser.parse_bool_expression()
+            Parser.expect("ELSE")
+            false_expression = Parser.parse_bool_expression()
+            Parser.expect("CLOSE_BRA")
+            return ConditionalExpression("if_expression", [condition, true_expression, false_expression])
 
         raise ValueError(f"[Parser] Unexpected token {Parser.lexer.next.type}")
 
@@ -345,6 +484,11 @@ class Parser:
             Parser.lexer.select_next()
             child = Parser.parse_factor()
             return UnOp(op, [child])
+
+        if Parser.lexer.next.type == "NOT":
+            Parser.lexer.select_next()
+            child = Parser.parse_factor()
+            return UnOp("not", [child])
 
         return Parser.parse_atom()
 
@@ -373,18 +517,52 @@ class Parser:
         return result
 
     @staticmethod
+    def parse_rel_expression() -> Node:
+        result = Parser.parse_expression()
+
+        while Parser.lexer.next.type in ("EQ", "GT", "LT"):
+            op = Parser.lexer.next.value
+            Parser.lexer.select_next()
+            right = Parser.parse_expression()
+            result = BinOp(op, [result, right])
+
+        return result
+
+    @staticmethod
+    def parse_bool_term() -> Node:
+        result = Parser.parse_rel_expression()
+
+        while Parser.lexer.next.type == "AND":
+            Parser.lexer.select_next()
+            right = Parser.parse_rel_expression()
+            result = BinOp("and", [result, right])
+
+        return result
+
+    @staticmethod
+    def parse_bool_expression() -> Node:
+        result = Parser.parse_bool_term()
+
+        while Parser.lexer.next.type == "OR":
+            Parser.lexer.select_next()
+            right = Parser.parse_bool_term()
+            result = BinOp("or", [result, right])
+
+        return result
+
+    @staticmethod
     def parse_statement() -> Node:
         if Parser.lexer.next.type == "IDEN":
             identifier = Identifier(Parser.lexer.next.value)
             Parser.lexer.select_next()
             Parser.expect("ASSIGN")
-            expression = Parser.parse_expression()
+            expression = Parser.parse_bool_expression()
             return Assignment("=", [identifier, expression])
 
         if Parser.lexer.next.type == "PRINT":
             Parser.lexer.select_next()
             Parser.expect("OPEN_PAR")
-            expression = Parser.parse_expression()
+            expression = Parser.parse_bool_expression()
             Parser.expect("CLOSE_PAR")
             return Print("print", [expression])
 
@@ -397,8 +575,54 @@ class Parser:
             identifier = Identifier(Parser.lexer.next.value)
             Parser.lexer.select_next()
             Parser.expect("ASSIGN")
-            expression = Parser.parse_expression()
+            expression = Parser.parse_bool_expression()
             return ImmutableAssignment("imut", [identifier, expression])
+
+        if Parser.lexer.next.type == "IF":
+            Parser.lexer.select_next()
+            Parser.expect("OPEN_PAR")
+            condition = Parser.parse_bool_expression()
+            Parser.expect("CLOSE_PAR")
+            Parser.expect("OPEN_IF_BRA")
+            Parser.skip_end_lines()
+            true_block = Parser.parse_block(stop_tokens={"ELSE", "CLOSE_BRA"})
+
+            children = [condition, true_block]
+            if Parser.lexer.next.type == "ELSE":
+                Parser.lexer.select_next()
+                Parser.skip_end_lines()
+                false_block = Parser.parse_block(stop_tokens={"CLOSE_BRA"})
+                children.append(false_block)
+
+            Parser.expect("CLOSE_BRA")
+            return If("if", children)
+
+        if Parser.lexer.next.type == "WHILE":
+            Parser.lexer.select_next()
+            Parser.expect("OPEN_PAR")
+            condition = Parser.parse_bool_expression()
+            Parser.expect("CLOSE_PAR")
+            Parser.expect("OPEN_BRA")
+            Parser.skip_end_lines()
+            block = Parser.parse_block(stop_tokens={"CLOSE_BRA"})
+            Parser.expect("CLOSE_BRA")
+            return While("while", [condition, block])
+
+        if Parser.lexer.next.type == "FOR":
+            Parser.lexer.select_next()
+            if Parser.lexer.next.type != "IDEN":
+                raise ValueError(f"[Parser] Expected identifier after for, got {Parser.lexer.next.type}")
+            identifier = Identifier(Parser.lexer.next.value)
+            Parser.lexer.select_next()
+            Parser.expect("ASSIGN")
+            start_expression = Parser.parse_bool_expression()
+            Parser.expect("COMMA")
+            end_expression = Parser.parse_bool_expression()
+            Parser.expect("OPEN_BRA")
+            Parser.skip_end_lines()
+            block = Parser.parse_block(stop_tokens={"CLOSE_BRA"})
+            Parser.expect("CLOSE_BRA")
+            return For("for", [identifier, start_expression, end_expression, block])
 
         if Parser.lexer.next.type == "CONST":
             raise ValueError("[Parser] Constants must be declared as: const NAME VALUE")
@@ -406,10 +630,13 @@ class Parser:
         raise ValueError(f"[Parser] Unexpected token {Parser.lexer.next.type} at start of statement")
 
     @staticmethod
-    def parse_program() -> Node:
+    def parse_block(stop_tokens=None) -> Node:
+        if stop_tokens is None:
+            stop_tokens = {"EOF"}
+
         children = []
 
-        while Parser.lexer.next.type != "EOF":
+        while Parser.lexer.next.type not in stop_tokens and Parser.lexer.next.type != "EOF":
             if Parser.lexer.next.type == "END":
                 children.append(NoOp(None))
                 Parser.lexer.select_next()
@@ -418,11 +645,18 @@ class Parser:
             children.append(Parser.parse_statement())
 
             if Parser.lexer.next.type == "END":
-                Parser.lexer.select_next()
-            elif Parser.lexer.next.type != "EOF":
+                Parser.skip_end_lines()
+            elif Parser.lexer.next.type not in stop_tokens and Parser.lexer.next.type != "EOF":
                 raise ValueError(f"[Parser] Expected end of line, got {Parser.lexer.next.type}")
 
         return Block(None, children)
+
+    @staticmethod
+    def parse_program() -> Node:
+        block = Parser.parse_block(stop_tokens={"EOF"})
+        if Parser.lexer.next.type != "EOF":
+            raise ValueError(f"[Parser] Unexpected token {Parser.lexer.next.type}")
+        return block
 
     @staticmethod
     def run(code: str) -> Node:
