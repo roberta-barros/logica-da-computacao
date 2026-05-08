@@ -1,5 +1,7 @@
+import re
 import sys
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 
 class Token:
@@ -7,75 +9,230 @@ class Token:
         self.type = type_
         self.value = value
 
+    def __repr__(self):
+        return f"Token({self.type!r}, {self.value!r})"
+
+
+@dataclass
+class Variable:
+    value: int
+    mutable: bool = True
+
+
+class SymbolTable:
+    def __init__(self):
+        self._table: dict[str, Variable] = {}
+
+    @property
+    def table(self) -> dict[str, Variable]:
+        return self._table
+
+    @table.setter
+    def table(self, value: dict[str, Variable]) -> None:
+        self._table = value
+
+    def get(self, name: str) -> int:
+        if name not in self._table:
+            raise ValueError(f"[Semantic] Variable '{name}' does not exist")
+        return self._table[name].value
+
+    def set(self, name: str, value: int) -> None:
+        if name in self._table:
+            variable = self._table[name]
+            if not variable.mutable:
+                raise ValueError(f"[Semantic] Cannot change the value of {name}")
+            variable.value = value
+            return
+
+        self._table[name] = Variable(value=value, mutable=True)
+
+    def declare_immutable(self, name: str, value: int) -> None:
+        if name in self._table:
+            raise ValueError(f"[Semantic] Variable '{name}' already exists")
+        self._table[name] = Variable(value=value, mutable=False)
+
+
+class PrePro:
+    RESERVED_WORDS = {"print", "const", "imut"}
+    IDENTIFIER_RE = r"[A-Za-z][A-Za-z0-9_]*"
+
+    @staticmethod
+    def filter(code: str) -> str:
+        """
+        Removes inline comments and resolves constants before lexical analysis.
+
+        Constant syntax:
+            const NAME VALUE
+
+        Example:
+            const N 1
+            print(N)
+
+        After preprocessing, this becomes:
+            print(1)
+        """
+        # Remove inline comments, preserving line breaks.
+        code_without_comments = re.sub(r"--[^\n]*", "", code)
+
+        constants: dict[str, str] = {}
+        lines_without_const_declarations: list[str] = []
+
+        for raw_line in code_without_comments.splitlines(keepends=True):
+            has_newline = raw_line.endswith("\n")
+            line = raw_line[:-1] if has_newline else raw_line
+            stripped = line.strip()
+
+            if not stripped:
+                lines_without_const_declarations.append(raw_line)
+                continue
+
+            if stripped.startswith("const"):
+                match = re.fullmatch(
+                    rf"const\s+({PrePro.IDENTIFIER_RE})\s+([+-]?\d+)\s*",
+                    stripped,
+                )
+                if match is None:
+                    raise ValueError("[PrePro] Invalid constant declaration. Use: const NAME VALUE")
+
+                name, value = match.group(1), match.group(2)
+
+                if name in PrePro.RESERVED_WORDS:
+                    raise ValueError(f"[PrePro] Reserved word '{name}' cannot be used as a constant")
+                if name in constants:
+                    raise ValueError(f"[PrePro] Constant '{name}' already exists")
+
+                constants[name] = value
+                # Remove the constant declaration from the code, but keep the line advance.
+                lines_without_const_declarations.append("\n" if has_newline else "")
+                continue
+
+            lines_without_const_declarations.append(raw_line)
+
+        filtered_code = "".join(lines_without_const_declarations)
+
+        # Replace constants only when they appear as full identifiers.
+        for name, value in constants.items():
+            filtered_code = re.sub(
+                rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])",
+                value,
+                filtered_code,
+            )
+
+        return filtered_code
+
 
 class Node(ABC):
-    def __init__(self, value, children):
+    def __init__(self, value, children=None):
         self.value = value
-        self.children = children
+        self.children = children if children is not None else []
 
     @abstractmethod
-    def evaluate(self) -> int:
+    def evaluate(self, st: SymbolTable):
         pass
 
 
 class IntVal(Node):
-    def __init__(self, value, children=None):
-        super().__init__(value, children if children is not None else [])
-
-    def evaluate(self) -> int:
+    def evaluate(self, st: SymbolTable) -> int:
         return self.value
 
 
-class UnOp(Node):
-    def __init__(self, value, children=None):
-        super().__init__(value, children if children is not None else [])
+class Identifier(Node):
+    def evaluate(self, st: SymbolTable) -> int:
+        return st.get(self.value)
 
-    def evaluate(self) -> int:
-        child_val = self.children[0].evaluate()
+
+class UnOp(Node):
+    def evaluate(self, st: SymbolTable) -> int:
+        child_val = self.children[0].evaluate(st)
+
         if self.value == "+":
             return +child_val
-        elif self.value == "-":
+        if self.value == "-":
             return -child_val
-        elif self.value == "!":
+        if self.value == "!":
             if child_val < 0:
                 raise ValueError("[Semantic] Factorial of negative number")
             result = 1
             for i in range(1, child_val + 1):
                 result *= i
             return result
+
         raise ValueError(f"[Semantic] Unknown unary operator '{self.value}'")
 
 
 class BinOp(Node):
-    def __init__(self, value, children=None):
-        super().__init__(value, children if children is not None else [])
+    def evaluate(self, st: SymbolTable) -> int:
+        left_val = self.children[0].evaluate(st)
+        right_val = self.children[1].evaluate(st)
 
-    def evaluate(self) -> int:
-        left_val = self.children[0].evaluate()
-        right_val = self.children[1].evaluate()
         if self.value == "+":
             return left_val + right_val
-        elif self.value == "-":
+        if self.value == "-":
             return left_val - right_val
-        elif self.value == "*":
+        if self.value == "*":
             return left_val * right_val
-        elif self.value == "/":
+        if self.value == "/":
             if right_val == 0:
                 raise ValueError("[Semantic] Division by zero")
             return int(left_val / right_val)
+
         raise ValueError(f"[Semantic] Unknown binary operator '{self.value}'")
 
 
+class Assignment(Node):
+    def evaluate(self, st: SymbolTable):
+        identifier = self.children[0].value
+        value = self.children[1].evaluate(st)
+        st.set(identifier, value)
+
+
+class ImmutableAssignment(Node):
+    def evaluate(self, st: SymbolTable):
+        identifier = self.children[0].value
+        value = self.children[1].evaluate(st)
+        st.declare_immutable(identifier, value)
+
+
+class Print(Node):
+    def evaluate(self, st: SymbolTable):
+        print(self.children[0].evaluate(st))
+
+
+class Block(Node):
+    def evaluate(self, st: SymbolTable):
+        for child in self.children:
+            child.evaluate(st)
+
+
+class NoOp(Node):
+    def evaluate(self, st: SymbolTable):
+        pass
+
+
 class Lexer:
+    RESERVED_WORDS = {
+        "print": "PRINT",
+        "imut": "IMUT",
+        "const": "CONST",
+    }
+
     def __init__(self, source: str):
         self.source = source
         self.position = 0
         self.next = Token("EOF", "")
 
+    @staticmethod
+    def is_letter(ch: str) -> bool:
+        return ch.isascii() and ch.isalpha()
+
+    @staticmethod
+    def is_identifier_char(ch: str) -> bool:
+        return ch.isascii() and (ch.isalnum() or ch == "_")
+
     def select_next(self) -> None:
         s = self.source
 
-        while self.position < len(s) and s[self.position].isspace():
+        while self.position < len(s) and s[self.position] in " \t\r":
             self.position += 1
 
         if self.position >= len(s):
@@ -84,6 +241,14 @@ class Lexer:
 
         ch = s[self.position]
 
+        if ch == "\n":
+            self.position += 1
+            self.next = Token("END", "\n")
+            return
+        if ch == "=":
+            self.position += 1
+            self.next = Token("ASSIGN", "=")
+            return
         if ch == "+":
             self.position += 1
             self.next = Token("PLUS", "+")
@@ -121,42 +286,60 @@ class Lexer:
             self.next = Token("INT", int(num))
             return
 
+        if Lexer.is_letter(ch):
+            identifier = ""
+            while self.position < len(s) and Lexer.is_identifier_char(s[self.position]):
+                identifier += s[self.position]
+                self.position += 1
+
+            token_type = Lexer.RESERVED_WORDS.get(identifier, "IDEN")
+            self.next = Token(token_type, identifier)
+            return
+
         raise ValueError(f"[Lexer] Invalid symbol '{ch}' at position {self.position}")
 
 
 class Parser:
-    lexer = None
+    lexer: Lexer | None = None
+
+    @staticmethod
+    def expect(token_type: str) -> None:
+        if Parser.lexer.next.type != token_type:
+            raise ValueError(f"[Parser] Expected {token_type}, got {Parser.lexer.next.type}")
+        Parser.lexer.select_next()
 
     @staticmethod
     def parse_primary() -> Node:
-        """Nível mais baixo: números e parênteses"""
         if Parser.lexer.next.type == "INT":
             node = IntVal(Parser.lexer.next.value)
+            Parser.lexer.select_next()
+            return node
+
+        if Parser.lexer.next.type == "IDEN":
+            node = Identifier(Parser.lexer.next.value)
             Parser.lexer.select_next()
             return node
 
         if Parser.lexer.next.type == "OPEN_PAR":
             Parser.lexer.select_next()
             node = Parser.parse_expression()
-            if Parser.lexer.next.type != "CLOSE_PAR":
-                raise ValueError(f"[Parser] Expected ')', got {Parser.lexer.next.type}")
-            Parser.lexer.select_next()
+            Parser.expect("CLOSE_PAR")
             return node
 
         raise ValueError(f"[Parser] Unexpected token {Parser.lexer.next.type}")
 
     @staticmethod
     def parse_atom() -> Node:
-        """Lê um primary e verifica se tem ! depois (pós-fixo)"""
         node = Parser.parse_primary()
-        if Parser.lexer.next.type == "FACT":
+
+        while Parser.lexer.next.type == "FACT":
             Parser.lexer.select_next()
             node = UnOp("!", [node])
+
         return node
 
     @staticmethod
     def parse_factor() -> Node:
-        """Operadores unários pré-fixos (+/-) e chama atom"""
         if Parser.lexer.next.type in ("PLUS", "MINUS"):
             op = Parser.lexer.next.value
             Parser.lexer.select_next()
@@ -190,23 +373,80 @@ class Parser:
         return result
 
     @staticmethod
+    def parse_statement() -> Node:
+        if Parser.lexer.next.type == "IDEN":
+            identifier = Identifier(Parser.lexer.next.value)
+            Parser.lexer.select_next()
+            Parser.expect("ASSIGN")
+            expression = Parser.parse_expression()
+            return Assignment("=", [identifier, expression])
+
+        if Parser.lexer.next.type == "PRINT":
+            Parser.lexer.select_next()
+            Parser.expect("OPEN_PAR")
+            expression = Parser.parse_expression()
+            Parser.expect("CLOSE_PAR")
+            return Print("print", [expression])
+
+        if Parser.lexer.next.type == "IMUT":
+            Parser.lexer.select_next()
+
+            if Parser.lexer.next.type != "IDEN":
+                raise ValueError(f"[Parser] Expected identifier after imut, got {Parser.lexer.next.type}")
+
+            identifier = Identifier(Parser.lexer.next.value)
+            Parser.lexer.select_next()
+            Parser.expect("ASSIGN")
+            expression = Parser.parse_expression()
+            return ImmutableAssignment("imut", [identifier, expression])
+
+        if Parser.lexer.next.type == "CONST":
+            raise ValueError("[Parser] Constants must be declared as: const NAME VALUE")
+
+        raise ValueError(f"[Parser] Unexpected token {Parser.lexer.next.type} at start of statement")
+
+    @staticmethod
+    def parse_program() -> Node:
+        children = []
+
+        while Parser.lexer.next.type != "EOF":
+            if Parser.lexer.next.type == "END":
+                children.append(NoOp(None))
+                Parser.lexer.select_next()
+                continue
+
+            children.append(Parser.parse_statement())
+
+            if Parser.lexer.next.type == "END":
+                Parser.lexer.select_next()
+            elif Parser.lexer.next.type != "EOF":
+                raise ValueError(f"[Parser] Expected end of line, got {Parser.lexer.next.type}")
+
+        return Block(None, children)
+
+    @staticmethod
     def run(code: str) -> Node:
-        Parser.lexer = Lexer(code)
+        filtered_code = PrePro.filter(code)
+        Parser.lexer = Lexer(filtered_code)
         Parser.lexer.select_next()
+        return Parser.parse_program()
 
-        tree = Parser.parse_expression()
 
-        if Parser.lexer.next.type != "EOF":
-            raise ValueError(f"[Parser] Unexpected token {Parser.lexer.next.type}")
+def read_source_code() -> str:
+    if len(sys.argv) > 1:
+        with open(sys.argv[1], "r", encoding="utf-8") as file:
+            return file.read() + "\n"
 
-        return tree
+    return sys.stdin.read() + "\n"
 
 
 def main():
-    code = sys.argv[1] if len(sys.argv) > 1 else input()
+    code = read_source_code()
+
     try:
         tree = Parser.run(code)
-        print(tree.evaluate())
+        st = SymbolTable()
+        tree.evaluate(st)
     except Exception as e:
         print(e)
         sys.exit(1)
