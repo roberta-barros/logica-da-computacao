@@ -1,4 +1,5 @@
 import sys
+import os
 import re
 from abc import ABC, abstractmethod
 
@@ -17,15 +18,16 @@ class PrePro:
 
 
 class Variable:
-    def __init__(self, value, type_):
+    def __init__(self, value, type_, shift=None):
         self.value = value
         self.type = type_
-
+        self.shift = shift
 
 
 class SymbolTable:
     def __init__(self):
         self.table: dict[str, Variable] = {}
+        self.next_shift = 0
 
     def get_value(self, name: str) -> Variable:
         if name not in self.table:
@@ -33,12 +35,23 @@ class SymbolTable:
         variable = self.table[name]
         if variable.value is None:
             raise ValueError(f"[Semantic] Variable '{name}' declared but not assigned")
-        return Variable(variable.value, variable.type)
+        return Variable(variable.value, variable.type, variable.shift)
 
-    def create_variable(self, name: str, type_: str) -> None:
+    def get_symbol(self, name: str, require_assigned: bool = True) -> Variable:
+        if name not in self.table:
+            raise ValueError(f"[Semantic] Variable '{name}' not declared")
+        variable = self.table[name]
+        if require_assigned and variable.value is None:
+            raise ValueError(f"[Semantic] Variable '{name}' declared but not assigned")
+        return variable
+
+    def create_variable(self, name: str, type_: str) -> Variable:
         if name in self.table:
             raise ValueError(f"[Semantic] Variable '{name}' already declared")
-        self.table[name] = Variable(None, type_)
+        self.next_shift += 4
+        variable = Variable(None, type_, self.next_shift)
+        self.table[name] = variable
+        return variable
 
     def set_value(self, name: str, variable: Variable) -> None:
         if name not in self.table:
@@ -51,14 +64,93 @@ class SymbolTable:
             )
         current.value = variable.value
 
+    def mark_assigned(self, name: str, variable: Variable) -> None:
+        """Marca uma variável como atribuída durante a geração de código.
+
+        Como na compilação o valor real só existirá em tempo de execução,
+        guardamos apenas um valor sentinela para manter a checagem semântica
+        de variável declarada antes de uso.
+        """
+        if name not in self.table:
+            raise ValueError(f"[Semantic] Variable '{name}' not declared")
+        current = self.table[name]
+        if current.type != variable.type:
+            raise ValueError(
+                f"[Semantic] Type mismatch in assignment to '{name}': "
+                f"expected {current.type}, got {variable.type}"
+            )
+        current.value = 0
+
+
+class Code:
+    instructions: list[str] = []
+
+    @staticmethod
+    def reset() -> None:
+        Code.instructions = []
+
+    @staticmethod
+    def append(code: str) -> None:
+        Code.instructions.append(code)
+
+    @staticmethod
+    def dump(filename: str) -> None:
+        header = """section .data
+    format_out: db "%d", 10, 0 ; format do printf
+    format_in: db "%d", 0 ; format do scanf
+    scan_int: dd 0 ; 32-bits integer
+
+section .text
+    extern printf ; usar printf para Linux
+    extern scanf ; usar scanf para Linux
+    global _start ; início do programa
+
+_start:
+    push ebp ; guarda o EBP
+    mov ebp, esp ; zera a pilha
+
+    ; aqui começa o código gerado:"""
+
+        footer = """
+
+    ; aqui termina o código gerado
+
+    mov esp, ebp ; reestabelece a pilha
+    pop ebp
+
+    ; chamada da interrupcao de saida (Linux)
+    mov eax, 1
+    xor ebx, ebx
+    int 0x80
+"""
+
+        with open(filename, "w") as file:
+            file.write(header)
+            if Code.instructions:
+                file.write("\n")
+                file.write("\n".join(Code.instructions))
+            file.write(footer)
+
 
 class Node(ABC):
+    id = 0
+
     def __init__(self, value, children):
         self.value = value
         self.children = children
+        self.node_id = Node.newId()
+
+    @staticmethod
+    def newId() -> int:
+        Node.id += 1
+        return Node.id
 
     @abstractmethod
     def evaluate(self, st: SymbolTable):
+        pass
+
+    @abstractmethod
+    def generate(self, st: SymbolTable):
         pass
 
 
@@ -69,6 +161,10 @@ class IntVal(Node):
     def evaluate(self, st: SymbolTable) -> Variable:
         return Variable(self.value, "number")
 
+    def generate(self, st: SymbolTable) -> Variable:
+        Code.append(f"    mov eax, {self.value}")
+        return Variable(None, "number")
+
 
 class BoolVal(Node):
     def __init__(self, value, children=None):
@@ -77,6 +173,10 @@ class BoolVal(Node):
     def evaluate(self, st: SymbolTable) -> Variable:
         return Variable(self.value, "boolean")
 
+    def generate(self, st: SymbolTable) -> Variable:
+        Code.append(f"    mov eax, {1 if self.value else 0}")
+        return Variable(None, "boolean")
+
 
 class StringVal(Node):
     def __init__(self, value, children=None):
@@ -84,6 +184,9 @@ class StringVal(Node):
 
     def evaluate(self, st: SymbolTable) -> Variable:
         return Variable(self.value, "string")
+
+    def generate(self, st: SymbolTable) -> Variable:
+        raise ValueError("[CodeGen] Strings are not supported in Roteiro 8")
 
 
 class UnOp(Node):
@@ -104,6 +207,31 @@ class UnOp(Node):
             if child.type != "boolean":
                 raise ValueError("[Semantic] Unary 'not' expects boolean")
             return Variable(not child.value, "boolean")
+        raise ValueError(f"[Semantic] Unknown unary operator '{self.value}'")
+
+    def generate(self, st: SymbolTable) -> Variable:
+        child = self.children[0].generate(st)
+
+        if self.value == "+":
+            if child.type != "number":
+                raise ValueError("[Semantic] Unary '+' expects number")
+            return Variable(None, "number")
+
+        if self.value == "-":
+            if child.type != "number":
+                raise ValueError("[Semantic] Unary '-' expects number")
+            Code.append("    neg eax")
+            return Variable(None, "number")
+
+        if self.value == "not":
+            if child.type != "boolean":
+                raise ValueError("[Semantic] Unary 'not' expects boolean")
+            Code.append("    cmp eax, 0")
+            Code.append("    mov eax, 0")
+            Code.append("    mov ecx, 1")
+            Code.append("    cmove eax, ecx")
+            return Variable(None, "boolean")
+
         raise ValueError(f"[Semantic] Unknown unary operator '{self.value}'")
 
 
@@ -175,6 +303,86 @@ class BinOp(Node):
 
         raise ValueError(f"[Semantic] Unknown binary operator '{self.value}'")
 
+    def generate(self, st: SymbolTable) -> Variable:
+        left = self.children[0].generate(st)
+        Code.append("    push eax")
+        right = self.children[1].generate(st)
+        Code.append("    pop ecx")
+
+        if self.value == "+":
+            if left.type == right.type == "number":
+                Code.append("    add eax, ecx")
+                return Variable(None, "number")
+            raise ValueError("[Semantic] Operator '+' expects number+number")
+
+        if self.value == "..":
+            raise ValueError("[CodeGen] String concatenation is not supported in Roteiro 8")
+
+        if self.value == "-":
+            if left.type == right.type == "number":
+                Code.append("    sub ecx, eax")
+                Code.append("    mov eax, ecx")
+                return Variable(None, "number")
+            raise ValueError("[Semantic] Operator '-' expects number-number")
+
+        if self.value == "*":
+            if left.type == right.type == "number":
+                Code.append("    imul eax, ecx")
+                return Variable(None, "number")
+            raise ValueError("[Semantic] Operator '*' expects number*number")
+
+        if self.value == "/":
+            if left.type == right.type == "number":
+                Code.append("    mov ebx, eax")
+                Code.append("    mov eax, ecx")
+                Code.append("    cdq")
+                Code.append("    idiv ebx")
+                return Variable(None, "number")
+            raise ValueError("[Semantic] Operator '/' expects number/number")
+
+        if self.value == "==":
+            if left.type != right.type:
+                raise ValueError("[Semantic] Operator '==' expects operands of the same type")
+            if left.type == "string":
+                raise ValueError("[CodeGen] String comparison is not supported in Roteiro 8")
+            Code.append("    cmp ecx, eax")
+            Code.append("    mov eax, 0")
+            Code.append("    mov ecx, 1")
+            Code.append("    cmove eax, ecx")
+            return Variable(None, "boolean")
+
+        if self.value == ">":
+            if left.type == right.type == "number":
+                Code.append("    cmp ecx, eax")
+                Code.append("    mov eax, 0")
+                Code.append("    mov ecx, 1")
+                Code.append("    cmovg eax, ecx")
+                return Variable(None, "boolean")
+            raise ValueError("[Semantic] Operator '>' expects number>number")
+
+        if self.value == "<":
+            if left.type == right.type == "number":
+                Code.append("    cmp ecx, eax")
+                Code.append("    mov eax, 0")
+                Code.append("    mov ecx, 1")
+                Code.append("    cmovl eax, ecx")
+                return Variable(None, "boolean")
+            raise ValueError("[Semantic] Operator '<' expects number<number")
+
+        if self.value == "and":
+            if left.type == right.type == "boolean":
+                Code.append("    and eax, ecx")
+                return Variable(None, "boolean")
+            raise ValueError("[Semantic] Operator 'and' expects boolean and boolean")
+
+        if self.value == "or":
+            if left.type == right.type == "boolean":
+                Code.append("    or eax, ecx")
+                return Variable(None, "boolean")
+            raise ValueError("[Semantic] Operator 'or' expects boolean or boolean")
+
+        raise ValueError(f"[Semantic] Unknown binary operator '{self.value}'")
+
 
 class Identifier(Node):
     def __init__(self, value, children=None):
@@ -182,6 +390,13 @@ class Identifier(Node):
 
     def evaluate(self, st: SymbolTable) -> Variable:
         return st.get_value(self.value)
+
+    def generate(self, st: SymbolTable) -> Variable:
+        variable = st.get_symbol(self.value, require_assigned=True)
+        if variable.type == "string":
+            raise ValueError("[CodeGen] Strings are not supported in Roteiro 8")
+        Code.append(f"    mov eax, [ebp-{variable.shift}] ; recupera {self.value}")
+        return Variable(None, variable.type, variable.shift)
 
 
 class Assignment(Node):
@@ -192,6 +407,15 @@ class Assignment(Node):
         var_name = self.children[0].value
         var_value = self.children[1].evaluate(st)
         st.set_value(var_name, var_value)
+
+    def generate(self, st: SymbolTable) -> None:
+        var_name = self.children[0].value
+        variable = st.get_symbol(var_name, require_assigned=False)
+        if variable.type == "string":
+            raise ValueError("[CodeGen] Strings are not supported in Roteiro 8")
+        var_value = self.children[1].generate(st)
+        st.mark_assigned(var_name, var_value)
+        Code.append(f"    mov [ebp-{variable.shift}], eax ; {var_name} = eax")
 
 
 class VarDec(Node):
@@ -204,6 +428,17 @@ class VarDec(Node):
         if len(self.children) > 1:
             st.set_value(name, self.children[1].evaluate(st))
 
+    def generate(self, st: SymbolTable) -> None:
+        name = self.children[0].value
+        if self.value == "string":
+            raise ValueError("[CodeGen] Strings are not supported in Roteiro 8")
+        variable = st.create_variable(name, self.value)
+        Code.append(f"    sub esp, 4 ; var {name} {self.value} [EBP-{variable.shift}]")
+        if len(self.children) > 1:
+            var_value = self.children[1].generate(st)
+            st.mark_assigned(name, var_value)
+            Code.append(f"    mov [ebp-{variable.shift}], eax ; {name} = eax")
+
 
 class Print(Node):
     def __init__(self, value, children=None):
@@ -215,6 +450,15 @@ class Print(Node):
             print("true" if result.value else "false")
         else:
             print(result.value)
+
+    def generate(self, st: SymbolTable) -> None:
+        result = self.children[0].generate(st)
+        if result.type == "string":
+            raise ValueError("[CodeGen] Strings are not supported in Roteiro 8")
+        Code.append("    push eax ; empilha valor do print")
+        Code.append("    push format_out ; formato int de saída")
+        Code.append("    call printf")
+        Code.append("    add esp, 8 ; limpa os argumentos")
 
 
 class Read(Node):
@@ -231,6 +475,14 @@ class Read(Node):
             return Variable(False, "boolean")
         return Variable(raw, "string")
 
+    def generate(self, st: SymbolTable) -> Variable:
+        Code.append("    push scan_int ; endereço de memória de suporte")
+        Code.append("    push format_in ; formato de entrada (int)")
+        Code.append("    call scanf")
+        Code.append("    add esp, 8 ; remove os argumentos da pilha")
+        Code.append("    mov eax, dword [scan_int] ; retorna o valor lido em EAX")
+        return Variable(None, "number")
+
 
 class If(Node):
     """2 ou 3 filhos: [cond, if_block, else_block?]"""
@@ -245,6 +497,26 @@ class If(Node):
             self.children[1].evaluate(st)
         elif len(self.children) > 2:
             self.children[2].evaluate(st)
+
+    def generate(self, st: SymbolTable) -> None:
+        label_id = self.node_id
+        cond = self.children[0].generate(st)
+        if cond.type != "boolean":
+            raise ValueError("[Semantic] If condition must be boolean")
+
+        if len(self.children) > 2:
+            Code.append("    cmp eax, 0 ; verifica se a condição do if deu falso")
+            Code.append(f"    je else_{label_id}")
+            self.children[1].generate(st)
+            Code.append(f"    jmp exit_{label_id}")
+            Code.append(f"else_{label_id}:")
+            self.children[2].generate(st)
+            Code.append(f"exit_{label_id}:")
+        else:
+            Code.append("    cmp eax, 0 ; verifica se a condição do if deu falso")
+            Code.append(f"    je exit_{label_id}")
+            self.children[1].generate(st)
+            Code.append(f"exit_{label_id}:")
 
 
 class While(Node):
@@ -261,6 +533,18 @@ class While(Node):
                 break
             self.children[1].evaluate(st)
 
+    def generate(self, st: SymbolTable) -> None:
+        label_id = self.node_id
+        Code.append(f"loop_{label_id}: ; label do loop")
+        cond = self.children[0].generate(st)
+        if cond.type != "boolean":
+            raise ValueError("[Semantic] While condition must be boolean")
+        Code.append("    cmp eax, 0 ; se a condição for falsa, sai")
+        Code.append(f"    je exit_{label_id}")
+        self.children[1].generate(st)
+        Code.append(f"    jmp loop_{label_id}")
+        Code.append(f"exit_{label_id}:")
+
 
 class Block(Node):
     def __init__(self, value, children=None):
@@ -270,12 +554,19 @@ class Block(Node):
         for child in self.children:
             child.evaluate(st)
 
+    def generate(self, st: SymbolTable) -> None:
+        for child in self.children:
+            child.generate(st)
+
 
 class NoOp(Node):
     def __init__(self, value=None, children=None):
         super().__init__(value, children if children is not None else [])
 
     def evaluate(self, st: SymbolTable) -> None:
+        pass
+
+    def generate(self, st: SymbolTable) -> None:
         pass
 
 
@@ -720,7 +1011,12 @@ def main():
     tree = Parser.run(code)
 
     st = SymbolTable()
-    tree.evaluate(st)
+    Code.reset()
+    tree.generate(st)
+
+    output_filename = os.path.splitext(filename)[0] + ".asm"
+    Code.dump(output_filename)
+    print(f"[Main] Assembly generated: {output_filename}")
 
 
 if __name__ == "__main__":
