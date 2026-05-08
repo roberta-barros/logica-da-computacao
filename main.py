@@ -37,14 +37,6 @@ class SymbolTable:
             raise ValueError(f"[Semantic] Variable '{name}' declared but not assigned")
         return Variable(variable.value, variable.type, variable.shift)
 
-    def get_symbol(self, name: str, require_assigned: bool = True) -> Variable:
-        if name not in self.table:
-            raise ValueError(f"[Semantic] Variable '{name}' not declared")
-        variable = self.table[name]
-        if require_assigned and variable.value is None:
-            raise ValueError(f"[Semantic] Variable '{name}' declared but not assigned")
-        return variable
-
     def create_variable(self, name: str, type_: str) -> Variable:
         if name in self.table:
             raise ValueError(f"[Semantic] Variable '{name}' already declared")
@@ -64,30 +56,10 @@ class SymbolTable:
             )
         current.value = variable.value
 
-    def mark_assigned(self, name: str, variable: Variable) -> None:
-        """Marca uma variável como atribuída durante a geração de código.
-
-        Como na compilação o valor real só existirá em tempo de execução,
-        guardamos apenas um valor sentinela para manter a checagem semântica
-        de variável declarada antes de uso.
-        """
-        if name not in self.table:
-            raise ValueError(f"[Semantic] Variable '{name}' not declared")
-        current = self.table[name]
-        if current.type != variable.type:
-            raise ValueError(
-                f"[Semantic] Type mismatch in assignment to '{name}': "
-                f"expected {current.type}, got {variable.type}"
-            )
-        current.value = 0
 
 
 class Code:
-    instructions: list[str] = []
-
-    @staticmethod
-    def reset() -> None:
-        Code.instructions = []
+    instructions = []
 
     @staticmethod
     def append(code: str) -> None:
@@ -138,10 +110,10 @@ class Node(ABC):
     def __init__(self, value, children):
         self.value = value
         self.children = children
-        self.node_id = Node.newId()
+        self.node_id = Node.new_id()
 
     @staticmethod
-    def newId() -> int:
+    def new_id() -> int:
         Node.id += 1
         return Node.id
 
@@ -392,7 +364,7 @@ class Identifier(Node):
         return st.get_value(self.value)
 
     def generate(self, st: SymbolTable) -> Variable:
-        variable = st.get_symbol(self.value, require_assigned=True)
+        variable = st.get_value(self.value)
         if variable.type == "string":
             raise ValueError("[CodeGen] Strings are not supported in Roteiro 8")
         Code.append(f"    mov eax, [ebp-{variable.shift}] ; recupera {self.value}")
@@ -410,11 +382,13 @@ class Assignment(Node):
 
     def generate(self, st: SymbolTable) -> None:
         var_name = self.children[0].value
-        variable = st.get_symbol(var_name, require_assigned=False)
+        if var_name not in st.table:
+            raise ValueError(f"[Semantic] Variable '{var_name}' not declared")
+        variable = st.table[var_name]
         if variable.type == "string":
             raise ValueError("[CodeGen] Strings are not supported in Roteiro 8")
         var_value = self.children[1].generate(st)
-        st.mark_assigned(var_name, var_value)
+        st.set_value(var_name, Variable(0, var_value.type))
         Code.append(f"    mov [ebp-{variable.shift}], eax ; {var_name} = eax")
 
 
@@ -436,7 +410,7 @@ class VarDec(Node):
         Code.append(f"    sub esp, 4 ; var {name} {self.value} [EBP-{variable.shift}]")
         if len(self.children) > 1:
             var_value = self.children[1].generate(st)
-            st.mark_assigned(name, var_value)
+            st.set_value(name, Variable(0, var_value.type))
             Code.append(f"    mov [ebp-{variable.shift}], eax ; {name} = eax")
 
 
@@ -1011,7 +985,7 @@ def main():
     tree = Parser.run(code)
 
     st = SymbolTable()
-    Code.reset()
+    Code.instructions = []
     tree.generate(st)
 
     output_filename = os.path.splitext(filename)[0] + ".asm"
