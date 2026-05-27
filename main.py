@@ -1,7 +1,10 @@
 import sys
 import os
 import re
+
 from abc import ABC, abstractmethod
+
+
 
 
 class Token:
@@ -17,115 +20,90 @@ class PrePro:
         return re.sub(r"--[^\n]*", "", code)
 
 
+
+
 class Variable:
-    def __init__(self, value, type_, shift=None, is_param=False):
+    def __init__(self, value, type_, shift=None, is_function=False, is_struct=False):
         self.value = value
         self.type = type_
         self.shift = shift
-        self.is_param = is_param
-
-    def address(self) -> str:
-        """Retorna o endereço relativo a EBP. Parâmetros estão em [ebp+N],
-        locais em [ebp-N]."""
-        if self.is_param:
-            return f"ebp+{self.shift}"
-        return f"ebp-{self.shift}"
+        self.is_function = is_function
+        # is_struct = True somente para a *definição* de struct (o nó StructDec
+        # vive na SymbolTable raiz). Instâncias de struct usam um Variable
+        # normal cujo `value` é a SymbolTable contendo os campos.
+        self.is_struct = is_struct
 
 
 class SymbolTable:
-    def __init__(self):
+    def __init__(self, parent=None):
         self.table: dict[str, Variable] = {}
         self.next_shift = 0
+        self.parent = parent
 
     def get_value(self, name: str) -> Variable:
-        if name not in self.table:
-            raise ValueError(f"[Semantic] Variable '{name}' not declared")
-        variable = self.table[name]
-        if variable.value is None:
-            raise ValueError(f"[Semantic] Variable '{name}' declared but not assigned")
-        return Variable(variable.value, variable.type, variable.shift, variable.is_param)
+        if name in self.table:
+            variable = self.table[name]
+            if (
+                variable.value is None
+                and not variable.is_function
+                and not variable.is_struct
+            ):
+                raise ValueError(
+                    f"[Semantic] Variable '{name}' declared but not assigned"
+                )
+            return Variable(
+                variable.value,
+                variable.type,
+                variable.shift,
+                variable.is_function,
+                variable.is_struct,
+            )
+        if self.parent is not None:
+            return self.parent.get_value(name)
+        raise ValueError(f"[Semantic] Variable '{name}' not declared")
 
     def create_variable(self, name: str, type_: str) -> Variable:
         if name in self.table:
             raise ValueError(f"[Semantic] Variable '{name}' already declared")
         self.next_shift += 4
-        variable = Variable(None, type_, self.next_shift, is_param=False)
-        self.table[name] = variable
-        return variable
-
-    def create_parameter(self, name: str, type_: str, offset: int) -> Variable:
-        """Registra um parâmetro de função com offset positivo a partir de EBP."""
-        if name in self.table:
-            raise ValueError(f"[Semantic] Parameter '{name}' already declared")
-        # Valor placeholder (0) para o generate() não disparar a verificação
-        # de "declared but not assigned"; em tempo de execução, o valor real
-        # vem da pilha (foi empilhado pelo chamador antes do call).
-        variable = Variable(0, type_, offset, is_param=True)
+        variable = Variable(None, type_, self.next_shift)
         self.table[name] = variable
         return variable
 
     def set_value(self, name: str, variable: Variable) -> None:
-        if name not in self.table:
-            raise ValueError(f"[Semantic] Variable '{name}' not declared")
-        current = self.table[name]
-        if current.type != variable.type:
-            raise ValueError(
-                f"[Semantic] Type mismatch in assignment to '{name}': "
-                f"expected {current.type}, got {variable.type}"
-            )
-        current.value = variable.value
-
-
-class FuncTable:
-    """Tabela global de funções definidas pelo usuário."""
-    functions: dict = {}
-
-    @staticmethod
-    def declare(name: str, node) -> None:
-        if name in FuncTable.functions:
-            raise ValueError(f"[Semantic] Function '{name}' already declared")
-        FuncTable.functions[name] = node
-
-    @staticmethod
-    def get(name: str):
-        if name not in FuncTable.functions:
-            raise ValueError(f"[Semantic] Function '{name}' not declared")
-        return FuncTable.functions[name]
-
-    @staticmethod
-    def reset() -> None:
-        FuncTable.functions = {}
-
-
-class ReturnException(Exception):
-    """Usado no evaluate() para "desempilhar" o corpo da função em um return."""
-    def __init__(self, value, type_):
-        super().__init__()
-        self.value = value
-        self.type = type_
+        if name in self.table:
+            current = self.table[name]
+            if current.is_function:
+                raise ValueError(
+                    f"[Semantic] '{name}' is a function and cannot be reassigned"
+                )
+            if current.is_struct:
+                raise ValueError(
+                    f"[Semantic] '{name}' is a struct type and cannot be reassigned"
+                )
+            if current.type != variable.type:
+                raise ValueError(
+                    f"[Semantic] Type mismatch in assignment to '{name}': "
+                    f"expected {current.type}, got {variable.type}"
+                )
+            current.value = variable.value
+            return
+        if self.parent is not None:
+            self.parent.set_value(name, variable)
+            return
+        raise ValueError(f"[Semantic] Variable '{name}' not declared")
 
 
 class Code:
-    instructions = []   # corpo do _start (código principal)
-    functions = []      # código de funções definidas pelo usuário
-    current_target = "main"  # "main" ou "function"
+    instructions = []
 
     @staticmethod
     def append(code: str) -> None:
-        if Code.current_target == "function":
-            Code.functions.append(code)
-        else:
-            Code.instructions.append(code)
-
-    @staticmethod
-    def reset() -> None:
-        Code.instructions = []
-        Code.functions = []
-        Code.current_target = "main"
+        Code.instructions.append(code)
 
     @staticmethod
     def dump(filename: str) -> None:
-        data_section = """section .data
+        header = """section .data
     format_out: db "%d", 10, 0 ; format do printf
     format_in: db "%d", 0 ; format do scanf
     scan_int: dd 0 ; 32-bits integer
@@ -134,19 +112,32 @@ section .text
     extern printf ; usar printf para Linux
     extern scanf ; usar scanf para Linux
     global _start ; início do programa
-"""
 
-        start_header = """
+
+
+
 _start:
     push ebp ; guarda o EBP
     mov ebp, esp ; zera a pilha
+
+
+
+
 
     ; aqui começa o código gerado:"""
 
         footer = """
 
-    ; aqui termina o código gerado
 
+
+
+
+
+
+
+
+
+    ; aqui termina o código gerado
     mov esp, ebp ; reestabelece a pilha
     pop ebp
 
@@ -157,12 +148,7 @@ _start:
 """
 
         with open(filename, "w") as file:
-            file.write(data_section)
-            if Code.functions:
-                file.write("\n")
-                file.write("\n".join(Code.functions))
-                file.write("\n")
-            file.write(start_header)
+            file.write(header)
             if Code.instructions:
                 file.write("\n")
                 file.write("\n".join(Code.instructions))
@@ -223,7 +209,7 @@ class StringVal(Node):
         return Variable(self.value, "string")
 
     def generate(self, st: SymbolTable) -> Variable:
-        raise ValueError("[CodeGen] Strings are not supported in Roteiro 8")
+        raise ValueError("[CodeGen] Strings are not supported")
 
 
 class UnOp(Node):
@@ -353,7 +339,7 @@ class BinOp(Node):
             raise ValueError("[Semantic] Operator '+' expects number+number")
 
         if self.value == "..":
-            raise ValueError("[CodeGen] String concatenation is not supported in Roteiro 8")
+            raise ValueError("[CodeGen] String concatenation not supported")
 
         if self.value == "-":
             if left.type == right.type == "number":
@@ -381,7 +367,7 @@ class BinOp(Node):
             if left.type != right.type:
                 raise ValueError("[Semantic] Operator '==' expects operands of the same type")
             if left.type == "string":
-                raise ValueError("[CodeGen] String comparison is not supported in Roteiro 8")
+                raise ValueError("[CodeGen] String comparison not supported")
             Code.append("    cmp ecx, eax")
             Code.append("    mov eax, 0")
             Code.append("    mov ecx, 1")
@@ -431,9 +417,9 @@ class Identifier(Node):
     def generate(self, st: SymbolTable) -> Variable:
         variable = st.get_value(self.value)
         if variable.type == "string":
-            raise ValueError("[CodeGen] Strings are not supported in Roteiro 8")
-        Code.append(f"    mov eax, [{variable.address()}] ; recupera {self.value}")
-        return Variable(None, variable.type, variable.shift, variable.is_param)
+            raise ValueError("[CodeGen] Strings are not supported")
+        Code.append(f"    mov eax, [ebp-{variable.shift}] ; recupera {self.value}")
+        return Variable(None, variable.type, variable.shift)
 
 
 class Assignment(Node):
@@ -451,10 +437,165 @@ class Assignment(Node):
             raise ValueError(f"[Semantic] Variable '{var_name}' not declared")
         variable = st.table[var_name]
         if variable.type == "string":
-            raise ValueError("[CodeGen] Strings are not supported in Roteiro 8")
+            raise ValueError("[CodeGen] Strings are not supported")
         var_value = self.children[1].generate(st)
         st.set_value(var_name, Variable(0, var_value.type))
-        Code.append(f"    mov [{variable.address()}], eax ; {var_name} = eax")
+        Code.append(f"    mov [ebp-{variable.shift}], eax ; {var_name} = eax")
+
+
+# === NOVOS NÓS PARA STRUCT ============================================
+
+NATIVE_TYPES = ("number", "string", "boolean")
+
+
+def _find_root(st: SymbolTable) -> SymbolTable:
+    """Sobe a cadeia de SymbolTables até a raiz (escopo global)."""
+    root = st
+    while root.parent is not None:
+        root = root.parent
+    return root
+
+
+class StructDec(Node):
+    """Declaração de struct.
+
+    value    = nome da struct (string)
+    children = lista de VarDec, um por campo
+    """
+    def __init__(self, value, children=None):
+        super().__init__(value, children if children is not None else [])
+
+    def evaluate(self, st: SymbolTable) -> None:
+        root_st = _find_root(st)
+        name = self.value
+        if name in root_st.table:
+            raise ValueError(f"[Semantic] Struct '{name}' already declared")
+        # Guarda o próprio nó como valor da "variável".
+        variable = Variable(self, name, shift=None, is_struct=True)
+        root_st.table[name] = variable
+
+    def generate(self, st: SymbolTable) -> None:
+        raise NotImplementedError("[CodeGen] Struct declarations not yet supported")
+
+
+class MemberAccess(Node):
+    """Acesso a um campo: a.b ou a.b.c ...
+
+    children = lista de Identifier, sendo o primeiro a variável base
+               e os demais os nomes dos campos.
+    """
+    def __init__(self, value, children=None):
+        super().__init__(value, children if children is not None else [])
+
+    def evaluate(self, st: SymbolTable) -> Variable:
+        base_name = self.children[0].value
+        # get_value normalmente checa "declarada mas sem valor"; para a base
+        # de um struct isso é OK porque o valor é a SymbolTable da instância.
+        base_var = st.get_value(base_name)
+
+        current = base_var
+        path = [base_name]
+
+        for i in range(1, len(self.children)):
+            field_name = self.children[i].value
+
+            if not isinstance(current.value, SymbolTable):
+                raise ValueError(
+                    f"[Semantic] '{'.'.join(path)}' is not a struct instance"
+                )
+            field_st = current.value
+            if field_name not in field_st.table:
+                raise ValueError(
+                    f"[Semantic] Struct has no field '{field_name}' "
+                    f"(accessing '{'.'.join(path + [field_name])}')"
+                )
+
+            field_var = field_st.table[field_name]
+            # Campo primitivo sem valor atribuído.
+            if (
+                field_var.value is None
+                and not field_var.is_function
+                and not field_var.is_struct
+            ):
+                raise ValueError(
+                    f"[Semantic] Field '{'.'.join(path + [field_name])}' "
+                    f"not assigned"
+                )
+            current = field_var
+            path.append(field_name)
+
+        return Variable(current.value, current.type)
+
+    def generate(self, st: SymbolTable) -> Variable:
+        raise NotImplementedError("[CodeGen] Member access not yet supported")
+
+
+class MemberAssignment(Node):
+    """Atribuição a um campo: a.b = expr  ou  a.b.c = expr ...
+
+    children[0..-2] = Identifiers (caminho de acesso, base + campos)
+    children[-1]    = expressão a ser atribuída
+    """
+    def __init__(self, value, children=None):
+        super().__init__(value, children if children is not None else [])
+
+    def evaluate(self, st: SymbolTable) -> None:
+        # 1. Avalia a expressão no escopo do chamador.
+        expr_value = self.children[-1].evaluate(st)
+
+        # 2. Navega da base até o struct que contém o campo final.
+        base_name = self.children[0].value
+        current = st.get_value(base_name)
+        path = [base_name]
+
+        # Identifiers intermediários: do índice 1 até len(children) - 3 inclusive.
+        for i in range(1, len(self.children) - 2):
+            field_name = self.children[i].value
+            if not isinstance(current.value, SymbolTable):
+                raise ValueError(
+                    f"[Semantic] '{'.'.join(path)}' is not a struct instance"
+                )
+            field_st = current.value
+            if field_name not in field_st.table:
+                raise ValueError(
+                    f"[Semantic] Struct has no field '{field_name}' "
+                    f"(accessing '{'.'.join(path + [field_name])}')"
+                )
+            current = field_st.table[field_name]
+            path.append(field_name)
+
+        # 3. current.value precisa ser a SymbolTable do struct que tem o campo final.
+        if not isinstance(current.value, SymbolTable):
+            raise ValueError(
+                f"[Semantic] '{'.'.join(path)}' is not a struct instance"
+            )
+
+        final_field = self.children[-2].value
+        target_st = current.value
+        if final_field not in target_st.table:
+            raise ValueError(
+                f"[Semantic] Struct has no field '{final_field}' "
+                f"(assigning to '{'.'.join(path + [final_field])}')"
+            )
+
+        field_var = target_st.table[final_field]
+        if field_var.is_function:
+            raise ValueError(
+                f"[Semantic] Field '{final_field}' is a function and cannot be reassigned"
+            )
+        if field_var.type != expr_value.type:
+            raise ValueError(
+                f"[Semantic] Type mismatch in assignment to "
+                f"'{'.'.join(path + [final_field])}': "
+                f"expected {field_var.type}, got {expr_value.type}"
+            )
+        field_var.value = expr_value.value
+
+    def generate(self, st: SymbolTable) -> None:
+        raise NotImplementedError("[CodeGen] Member assignment not yet supported")
+
+
+# ======================================================================
 
 
 class VarDec(Node):
@@ -463,20 +604,64 @@ class VarDec(Node):
 
     def evaluate(self, st: SymbolTable) -> None:
         name = self.children[0].value
-        st.create_variable(name, self.value)
+        var_type = self.value
+
+        # Tipo nativo: cria variável e (opcionalmente) atribui valor inicial.
+        if var_type in NATIVE_TYPES:
+            variable = st.create_variable(name, var_type)
+            variable.is_function = False
+            variable.is_struct = False
+            if len(self.children) > 1:
+                st.set_value(name, self.children[1].evaluate(st))
+            return
+
+        # Tipo customizado: deve ser uma struct declarada na raiz.
+        root_st = _find_root(st)
+        if var_type not in root_st.table:
+            raise ValueError(f"[Semantic] Type '{var_type}' not declared")
+
+        struct_var = root_st.table[var_type]
+        if not struct_var.is_struct:
+            raise ValueError(
+                f"[Semantic] '{var_type}' is not a valid type "
+                f"(declaring '{name}')"
+            )
+
+        # Inicialização na declaração não é permitida para structs.
         if len(self.children) > 1:
-            st.set_value(name, self.children[1].evaluate(st))
+            raise ValueError(
+                f"[Semantic] Struct variable '{name}' cannot be initialized "
+                f"at declaration"
+            )
+
+        # Instancia a struct: cria uma nova SymbolTable encadeada à raiz
+        # (para que os campos possam resolver tipos struct aninhados na raiz).
+        # O acesso aos campos é feito por table direta, não por get_value,
+        # então não há vazamento de nomes do escopo global.
+        instance_st = SymbolTable(parent=root_st)
+        struct_dec = struct_var.value  # nó StructDec
+        for field_dec in struct_dec.children:
+            field_dec.evaluate(instance_st)
+
+        if name in st.table:
+            raise ValueError(f"[Semantic] Variable '{name}' already declared")
+        new_var = Variable(instance_st, var_type)
+        new_var.is_function = False
+        new_var.is_struct = False
+        st.table[name] = new_var
 
     def generate(self, st: SymbolTable) -> None:
         name = self.children[0].value
         if self.value == "string":
-            raise ValueError("[CodeGen] Strings are not supported in Roteiro 8")
+            raise ValueError("[CodeGen] Strings are not supported")
+        if self.value not in NATIVE_TYPES:
+            raise NotImplementedError("[CodeGen] Structs are not supported")
         variable = st.create_variable(name, self.value)
         Code.append(f"    sub esp, 4 ; var {name} {self.value} [EBP-{variable.shift}]")
         if len(self.children) > 1:
             var_value = self.children[1].generate(st)
             st.set_value(name, Variable(0, var_value.type))
-            Code.append(f"    mov [{variable.address()}], eax ; {name} = eax")
+            Code.append(f"    mov [ebp-{variable.shift}], eax ; {name} = eax")
 
 
 class Print(Node):
@@ -493,7 +678,7 @@ class Print(Node):
     def generate(self, st: SymbolTable) -> None:
         result = self.children[0].generate(st)
         if result.type == "string":
-            raise ValueError("[CodeGen] Strings are not supported in Roteiro 8")
+            raise ValueError("[CodeGen] Strings are not supported")
         Code.append("    push eax ; empilha valor do print")
         Code.append("    push format_out ; formato int de saída")
         Code.append("    call printf")
@@ -528,14 +713,15 @@ class If(Node):
     def __init__(self, value, children=None):
         super().__init__(value, children if children is not None else [])
 
-    def evaluate(self, st: SymbolTable) -> None:
+    def evaluate(self, st: SymbolTable):
         cond = self.children[0].evaluate(st)
         if cond.type != "boolean":
             raise ValueError("[Semantic] If condition must be boolean")
         if cond.value:
-            self.children[1].evaluate(st)
-        elif len(self.children) > 2:
-            self.children[2].evaluate(st)
+            return self.children[1].evaluate(st)
+        if len(self.children) > 2:
+            return self.children[2].evaluate(st)
+        return None
 
     def generate(self, st: SymbolTable) -> None:
         label_id = self.node_id
@@ -563,14 +749,17 @@ class While(Node):
     def __init__(self, value, children=None):
         super().__init__(value, children if children is not None else [])
 
-    def evaluate(self, st: SymbolTable) -> None:
+    def evaluate(self, st: SymbolTable):
         while True:
             cond = self.children[0].evaluate(st)
             if cond.type != "boolean":
                 raise ValueError("[Semantic] While condition must be boolean")
             if not cond.value:
                 break
-            self.children[1].evaluate(st)
+            result = self.children[1].evaluate(st)
+            if result is not None:
+                return result
+        return None
 
     def generate(self, st: SymbolTable) -> None:
         label_id = self.node_id
@@ -589,25 +778,28 @@ class Block(Node):
     def __init__(self, value, children=None):
         super().__init__(value, children if children is not None else [])
 
-    def evaluate(self, st: SymbolTable) -> None:
-        # Pré-registra todas as funções declaradas neste bloco para permitir
-        # chamadas "forward" e recursão mútua.
+    def evaluate(self, st: SymbolTable):
         for child in self.children:
-            if isinstance(child, FuncDec) and child.value not in FuncTable.functions:
-                FuncTable.declare(child.value, child)
-        # Executa apenas os filhos que não são FuncDec (estes já foram registrados;
-        # o corpo só roda quando chamado).
-        for child in self.children:
-            if not isinstance(child, FuncDec):
-                child.evaluate(st)
+            if isinstance(child, Return):
+                return child.evaluate(st)
+
+            if isinstance(child, Block):
+                new_st = SymbolTable(parent=st)
+                result = child.evaluate(new_st)
+                if result is not None:
+                    return result
+                continue
+
+            if isinstance(child, (If, While)):
+                result = child.evaluate(st)
+                if result is not None:
+                    return result
+                continue
+
+            child.evaluate(st)
+        return None
 
     def generate(self, st: SymbolTable) -> None:
-        # Pré-registra funções para permitir chamadas forward / recursão mútua.
-        for child in self.children:
-            if isinstance(child, FuncDec) and child.value not in FuncTable.functions:
-                FuncTable.declare(child.value, child)
-        # Gera código de todos os filhos; FuncDec emite na lista 'functions',
-        # os demais nós emitem na lista 'instructions'.
         for child in self.children:
             child.generate(st)
 
@@ -623,173 +815,100 @@ class NoOp(Node):
         pass
 
 
-# =====================================================================
-# Extra Credit: Funções
-# =====================================================================
-
-class FuncDec(Node):
-    """
-    Declaração de função.
-      value     : nome da função (str)
-      children  : [params..., body]   (params: VarDec sem inicializador; body: Block)
-      return_type : tipo de retorno (str ou None)
-    """
-    def __init__(self, name, return_type, params, body):
-        super().__init__(name, list(params) + [body])
-        self.return_type = return_type
-        self.n_params = len(params)
-
-    @property
-    def params(self):
-        return self.children[: self.n_params]
-
-    @property
-    def body(self):
-        return self.children[self.n_params]
-
-    def evaluate(self, st: SymbolTable) -> None:
-        if self.value not in FuncTable.functions:
-            FuncTable.declare(self.value, self)
-
-    def generate(self, st: SymbolTable) -> None:
-        # Garante que esteja registrada (idempotente)
-        if self.value not in FuncTable.functions:
-            FuncTable.declare(self.value, self)
-
-        # Troca para o "alvo" de funções: tudo que append() receber agora
-        # vai para Code.functions (que é despejado antes de _start).
-        old_target = Code.current_target
-        Code.current_target = "function"
-
-        Code.append("")
-        Code.append(f"{self.value}: ; função {self.value}")
-        Code.append("    push ebp ; salva EBP do chamador")
-        Code.append("    mov ebp, esp ; novo frame")
-
-        # Cria um escopo local novo para a função
-        func_st = SymbolTable()
-
-        # Parâmetros vivem em [EBP+8], [EBP+12], ...
-        # ([EBP] = EBP antigo, [EBP+4] = endereço de retorno empilhado por 'call')
-        offset = 8
-        for param in self.params:
-            param_name = param.children[0].value
-            param_type = param.value
-            if param_type == "string":
-                raise ValueError("[CodeGen] String parameters are not supported in Roteiro 8")
-            func_st.create_parameter(param_name, param_type, offset)
-            Code.append(f"    ; param {param_name} {param_type} [EBP+{offset}]")
-            offset += 4
-
-        # Gera o corpo
-        self.body.generate(func_st)
-
-        # Epílogo padrão (caso a função não tenha return explícito no final).
-        # Se houver return no caminho, ele já emite seu próprio leave/ret.
-        Code.append(f"    ; epílogo padrão de {self.value} (fallthrough)")
-        Code.append("    mov esp, ebp ; restaura ESP")
-        Code.append("    pop ebp ; restaura EBP do chamador")
-        Code.append("    ret")
-
-        # Restaura o alvo anterior (volta para 'main' ou outro)
-        Code.current_target = old_target
-
-
-class FuncCall(Node):
-    """
-    Chamada de função.
-      value    : nome da função (str)
-      children : argumentos (expressões)
-    """
-    def __init__(self, name, args):
-        super().__init__(name, args)
+class Return(Node):
+    def __init__(self, value, children=None):
+        super().__init__(value, children if children is not None else [])
 
     def evaluate(self, st: SymbolTable) -> Variable:
-        func = FuncTable.get(self.value)
-        if len(self.children) != func.n_params:
-            raise ValueError(
-                f"[Semantic] Function '{self.value}' expects {func.n_params} "
-                f"argument(s), got {len(self.children)}"
-            )
+        return self.children[0].evaluate(st)
 
-        # Avalia argumentos no escopo do chamador
-        arg_values = [arg.evaluate(st) for arg in self.children]
-
-        # Cria escopo da função
-        func_st = SymbolTable()
-        for param, arg_val in zip(func.params, arg_values):
-            param_name = param.children[0].value
-            param_type = param.value
-            if arg_val.type != param_type:
-                raise ValueError(
-                    f"[Semantic] Argument type mismatch in call to '{self.value}': "
-                    f"expected {param_type}, got {arg_val.type}"
-                )
-            func_st.create_variable(param_name, param_type)
-            func_st.set_value(param_name, arg_val)
-
-        # Executa o corpo, capturando o return
-        try:
-            func.body.evaluate(func_st)
-        except ReturnException as ret:
-            return Variable(ret.value, ret.type)
-
-        # Função sem return explícito: retorno "vazio" (0/number)
-        return Variable(0, func.return_type or "number")
-
-    def generate(self, st: SymbolTable) -> Variable:
-        func = FuncTable.get(self.value)
-        if len(self.children) != func.n_params:
-            raise ValueError(
-                f"[Semantic] Function '{self.value}' expects {func.n_params} "
-                f"argument(s), got {len(self.children)}"
-            )
-
-        # Convenção cdecl: empilha argumentos da direita para a esquerda,
-        # assim o primeiro argumento fica em [EBP+8] dentro da função.
-        for arg in reversed(self.children):
-            arg.generate(st)
-            Code.append(f"    push eax ; arg para {self.value}")
-
-        Code.append(f"    call {self.value}")
-
-        # Chamador limpa a pilha (cdecl)
-        n_args = len(self.children)
-        if n_args > 0:
-            Code.append(f"    add esp, {4 * n_args} ; limpa args de {self.value}")
-
-        # O resultado da função vem em EAX
-        return Variable(None, func.return_type or "number")
+    def generate(self, st: SymbolTable) -> None:
+        raise NotImplementedError("[CodeGen] Return not yet supported")
 
 
-class Return(Node):
-    """
-    Return statement.
-      children : [] (vazio) ou [expr]
-    """
-    def __init__(self, value="return", children=None):
+class FuncDec(Node):
+    def __init__(self, value, children=None):
         super().__init__(value, children if children is not None else [])
 
     def evaluate(self, st: SymbolTable) -> None:
-        if self.children:
-            result = self.children[0].evaluate(st)
-            raise ReturnException(result.value, result.type)
-        raise ReturnException(0, "number")
+        root_st = _find_root(st)
+        name = self.children[0].value
+        variable = root_st.create_variable(name, self.value)
+        variable.value = self
+        variable.is_function = True
 
     def generate(self, st: SymbolTable) -> None:
-        if self.children:
-            self.children[0].generate(st)  # resultado em EAX
-        else:
-            Code.append("    mov eax, 0 ; return sem valor")
-        # Epílogo da função: restaura pilha e retorna ao chamador
-        Code.append("    mov esp, ebp ; epílogo (return)")
-        Code.append("    pop ebp")
-        Code.append("    ret")
+        raise NotImplementedError("[CodeGen] Function declarations not yet supported")
 
 
-# =====================================================================
-# Lexer
-# =====================================================================
+class FuncCall(Node):
+    def __init__(self, value, children=None):
+        super().__init__(value, children if children is not None else [])
+
+    def evaluate(self, st: SymbolTable):
+        name = self.value
+
+        try:
+            func_var = st.get_value(name)
+        except ValueError:
+            raise ValueError(f"[Semantic] Function '{name}' not declared")
+        if not func_var.is_function:
+            raise ValueError(f"[Semantic] '{name}' is not a function")
+
+        func_dec = func_var.value
+        return_type = func_var.type
+        params = func_dec.children[1:-1]
+        body = func_dec.children[-1]
+
+        if len(self.children) != len(params):
+            raise ValueError(
+                f"[Semantic] Function '{name}' expects {len(params)} "
+                f"argument(s), got {len(self.children)}"
+            )
+
+        evaluated_args = []
+        for i, arg_node in enumerate(self.children):
+            arg_var = arg_node.evaluate(st)
+            expected_type = params[i].value
+            if arg_var.type != expected_type:
+                raise ValueError(
+                    f"[Semantic] Argument {i + 1} of '{name}': "
+                    f"expected {expected_type}, got {arg_var.type}"
+                )
+            evaluated_args.append(arg_var)
+
+        root_st = _find_root(st)
+        new_st = SymbolTable(parent=root_st)
+
+        for param, arg_var in zip(params, evaluated_args):
+            param_name = param.children[0].value
+            param_type = param.value
+            new_st.create_variable(param_name, param_type)
+            new_st.set_value(param_name, Variable(arg_var.value, param_type))
+
+        result = body.evaluate(new_st)
+
+        if result is not None:
+            if return_type is None:
+                raise ValueError(
+                    f"[Semantic] Function '{name}' is void but returned a value"
+                )
+            if result.type != return_type:
+                raise ValueError(
+                    f"[Semantic] Function '{name}' must return {return_type}, "
+                    f"returned {result.type}"
+                )
+            return Variable(result.value, return_type)
+
+        if return_type is not None:
+            raise ValueError(
+                f"[Semantic] Function '{name}' must return a {return_type} value"
+            )
+        return None
+
+    def generate(self, st: SymbolTable) -> None:
+        raise NotImplementedError("[CodeGen] Function calls not yet supported")
+
 
 RESERVED_WORDS = {
     "print": "PRINT",
@@ -809,8 +928,9 @@ RESERVED_WORDS = {
     "string": "TYPE",
     "number": "TYPE",
     "boolean": "TYPE",
-    "function": "FUNCTION",
+    "function": "FUNC",
     "return": "RETURN",
+    "struct": "STRUCT",
 }
 
 
@@ -857,7 +977,9 @@ class Lexer:
                 self.position += 1
                 self.next = Token("CONCAT", "..")
                 return
-            raise ValueError(f"[Lexer] Invalid symbol '.' at position {self.position - 1}")
+            # Ponto único: acesso a campo de struct.
+            self.next = Token("DOT", ".")
+            return
 
         if ch == ":":
             self.position += 1
@@ -936,34 +1058,8 @@ class Lexer:
         raise ValueError(f"[Lexer] Invalid symbol '{ch}' at position {self.position}")
 
 
-# =====================================================================
-# Parser
-# =====================================================================
-
 class Parser:
     lexer = None
-
-    @staticmethod
-    def _parse_call_args() -> list:
-        """Consome '(args)' e retorna a lista de nós de argumentos.
-        Pressupõe que o lexer está em OPEN_PAR."""
-        if Parser.lexer.next.type != "OPEN_PAR":
-            raise ValueError(
-                f"[Parser] Expected '(' for call args, got {Parser.lexer.next.type}"
-            )
-        Parser.lexer.select_next()
-        args = []
-        if Parser.lexer.next.type != "CLOSE_PAR":
-            args.append(Parser.parse_bool_expression())
-            while Parser.lexer.next.type == "COMMA":
-                Parser.lexer.select_next()
-                args.append(Parser.parse_bool_expression())
-        if Parser.lexer.next.type != "CLOSE_PAR":
-            raise ValueError(
-                f"[Parser] Expected ')' in call args, got {Parser.lexer.next.type}"
-            )
-        Parser.lexer.select_next()
-        return args
 
     @staticmethod
     def parse_factor() -> Node:
@@ -1002,10 +1098,38 @@ class Parser:
         if token.type == "IDEN":
             name = token.value
             Parser.lexer.select_next()
-            # Função chamada como expressão: nome(args)
+
+            # Chamada de função como expressão: IDEN ( args )
             if Parser.lexer.next.type == "OPEN_PAR":
-                args = Parser._parse_call_args()
+                Parser.lexer.select_next()
+                args = []
+                if Parser.lexer.next.type != "CLOSE_PAR":
+                    args.append(Parser.parse_bool_expression())
+                    while Parser.lexer.next.type == "COMMA":
+                        Parser.lexer.select_next()
+                        args.append(Parser.parse_bool_expression())
+                if Parser.lexer.next.type != "CLOSE_PAR":
+                    raise ValueError(
+                        f"[Parser] Expected ')' to close call to '{name}', "
+                        f"got {Parser.lexer.next.type}"
+                    )
+                Parser.lexer.select_next()
                 return FuncCall(name, args)
+
+            # Acesso a campo de struct: IDEN . IDEN [. IDEN]*
+            if Parser.lexer.next.type == "DOT":
+                identifiers = [Identifier(name)]
+                while Parser.lexer.next.type == "DOT":
+                    Parser.lexer.select_next()
+                    if Parser.lexer.next.type != "IDEN":
+                        raise ValueError(
+                            f"[Parser] Expected field name after '.', "
+                            f"got {Parser.lexer.next.type}"
+                        )
+                    identifiers.append(Identifier(Parser.lexer.next.value))
+                    Parser.lexer.select_next()
+                return MemberAccess(None, identifiers)
+
             return Identifier(name)
 
         if token.type == "READ":
@@ -1088,37 +1212,56 @@ class Parser:
         return Block("block", stmts)
 
     @staticmethod
-    def parse_param() -> Node:
-        """Lê um parâmetro de função: IDEN [:] TYPE."""
+    def parse_var_declaration() -> Node:
+        if Parser.lexer.next.type != "VAR":
+            raise ValueError(
+                f"[Parser] Expected 'local', got {Parser.lexer.next.type}"
+            )
+        Parser.lexer.select_next()
+
         if Parser.lexer.next.type != "IDEN":
             raise ValueError(
-                f"[Parser] Expected parameter name, got {Parser.lexer.next.type}"
+                f"[Parser] Expected identifier after local, got {Parser.lexer.next.type}"
             )
         iden_node = Identifier(Parser.lexer.next.value)
         Parser.lexer.select_next()
 
-        # Aceita 'x number', 'x: number' e 'x::number'
+        # Aceita 'local x number', 'local x: number' e 'local x::number'.
         if Parser.lexer.next.type == "COLON":
             Parser.lexer.select_next()
             if Parser.lexer.next.type == "COLON":
                 Parser.lexer.select_next()
 
-        if Parser.lexer.next.type != "TYPE":
+        # Aceita TYPE (number/string/boolean) ou IDEN (nome de struct).
+        if Parser.lexer.next.type == "TYPE":
+            var_type = Parser.lexer.next.value
+        elif Parser.lexer.next.type == "IDEN":
+            var_type = Parser.lexer.next.value
+        else:
             raise ValueError(
-                f"[Parser] Expected type for parameter, got {Parser.lexer.next.type}"
+                f"[Parser] Expected type after variable name, got {Parser.lexer.next.type}"
             )
-        param_type = Parser.lexer.next.value
         Parser.lexer.select_next()
-        return VarDec(param_type, [iden_node])
+
+        children = [iden_node]
+        if Parser.lexer.next.type == "ASSIGN":
+            Parser.lexer.select_next()
+            children.append(Parser.parse_bool_expression())
+        return VarDec(var_type, children)
 
     @staticmethod
-    def parse_function_dec() -> Node:
-        """'function' já foi consumido."""
+    def parse_func_declaration() -> Node:
+        if Parser.lexer.next.type != "FUNC":
+            raise ValueError(
+                f"[Parser] Expected 'function', got {Parser.lexer.next.type}"
+            )
+        Parser.lexer.select_next()
+
         if Parser.lexer.next.type != "IDEN":
             raise ValueError(
                 f"[Parser] Expected function name, got {Parser.lexer.next.type}"
             )
-        name = Parser.lexer.next.value
+        name_node = Identifier(Parser.lexer.next.value)
         Parser.lexer.select_next()
 
         if Parser.lexer.next.type != "OPEN_PAR":
@@ -1129,35 +1272,55 @@ class Parser:
 
         params = []
         if Parser.lexer.next.type != "CLOSE_PAR":
-            params.append(Parser.parse_param())
-            while Parser.lexer.next.type == "COMMA":
-                Parser.lexer.select_next()
-                params.append(Parser.parse_param())
-
-        if Parser.lexer.next.type != "CLOSE_PAR":
-            raise ValueError(
-                f"[Parser] Expected ')' after parameters, got {Parser.lexer.next.type}"
-            )
-        Parser.lexer.select_next()
-
-        # Tipo de retorno opcional. Aceita:
-        #   ': TYPE'   (com dois-pontos)
-        #   'TYPE'     (estilo Lua-like usado pelo tester: 'function f(x number) number')
-        #   nada       (procedimento, ex: 'function main()')
-        return_type = None
-        if Parser.lexer.next.type == "COLON":
+            if Parser.lexer.next.type != "IDEN":
+                raise ValueError(
+                    f"[Parser] Expected parameter name, got {Parser.lexer.next.type}"
+                )
+            pname = Parser.lexer.next.value
             Parser.lexer.select_next()
             if Parser.lexer.next.type != "TYPE":
                 raise ValueError(
-                    f"[Parser] Expected return type after ':', got {Parser.lexer.next.type}"
+                    f"[Parser] Expected type for parameter '{pname}', "
+                    f"got {Parser.lexer.next.type}"
                 )
-            return_type = Parser.lexer.next.value
+            ptype = Parser.lexer.next.value
             Parser.lexer.select_next()
-        elif Parser.lexer.next.type == "TYPE":
+            params.append(VarDec(ptype, [Identifier(pname)]))
+
+            while Parser.lexer.next.type == "COMMA":
+                Parser.lexer.select_next()
+                if Parser.lexer.next.type != "IDEN":
+                    raise ValueError(
+                        f"[Parser] Expected parameter name, got {Parser.lexer.next.type}"
+                    )
+                pname = Parser.lexer.next.value
+                Parser.lexer.select_next()
+                if Parser.lexer.next.type != "TYPE":
+                    raise ValueError(
+                        f"[Parser] Expected type for parameter '{pname}', "
+                        f"got {Parser.lexer.next.type}"
+                    )
+                ptype = Parser.lexer.next.value
+                Parser.lexer.select_next()
+                params.append(VarDec(ptype, [Identifier(pname)]))
+
+        if Parser.lexer.next.type != "CLOSE_PAR":
+            raise ValueError(
+                f"[Parser] Expected ')' to close parameter list, "
+                f"got {Parser.lexer.next.type}"
+            )
+        Parser.lexer.select_next()
+
+        return_type = None
+        if Parser.lexer.next.type == "TYPE":
             return_type = Parser.lexer.next.value
             Parser.lexer.select_next()
 
-        # Pula EOLs
+        if Parser.lexer.next.type != "EOL":
+            raise ValueError(
+                f"[Parser] Expected newline after function signature, "
+                f"got {Parser.lexer.next.type}"
+            )
         while Parser.lexer.next.type == "EOL":
             Parser.lexer.select_next()
 
@@ -1169,7 +1332,57 @@ class Parser:
             )
         Parser.lexer.select_next()
 
-        return FuncDec(name, return_type, params, body)
+        return FuncDec(return_type, [name_node] + params + [body])
+
+    @staticmethod
+    def parse_struct_declaration() -> Node:
+        if Parser.lexer.next.type != "STRUCT":
+            raise ValueError(
+                f"[Parser] Expected 'struct', got {Parser.lexer.next.type}"
+            )
+        Parser.lexer.select_next()
+
+        if Parser.lexer.next.type != "IDEN":
+            raise ValueError(
+                f"[Parser] Expected struct name, got {Parser.lexer.next.type}"
+            )
+        struct_name = Parser.lexer.next.value
+        Parser.lexer.select_next()
+
+        if Parser.lexer.next.type != "EOL":
+            raise ValueError(
+                f"[Parser] Expected newline after struct name, "
+                f"got {Parser.lexer.next.type}"
+            )
+        while Parser.lexer.next.type == "EOL":
+            Parser.lexer.select_next()
+
+        fields = []
+        while Parser.lexer.next.type == "VAR":
+            field = Parser.parse_var_declaration()
+            if len(field.children) > 1:
+                raise ValueError(
+                    f"[Parser] Struct fields cannot have initialization "
+                    f"(field '{field.children[0].value}' of struct '{struct_name}')"
+                )
+            fields.append(field)
+            if Parser.lexer.next.type == "EOL":
+                while Parser.lexer.next.type == "EOL":
+                    Parser.lexer.select_next()
+            elif Parser.lexer.next.type != "CLOSE_BRA":
+                raise ValueError(
+                    f"[Parser] Expected newline inside struct body, "
+                    f"got {Parser.lexer.next.type}"
+                )
+
+        if Parser.lexer.next.type != "CLOSE_BRA":
+            raise ValueError(
+                f"[Parser] Expected 'end' to close struct '{struct_name}', "
+                f"got {Parser.lexer.next.type}"
+            )
+        Parser.lexer.select_next()
+
+        return StructDec(struct_name, fields)
 
     @staticmethod
     def parse_statement() -> Node:
@@ -1195,17 +1408,7 @@ class Parser:
 
         if token.type == "IF":
             Parser.lexer.select_next()
-            if Parser.lexer.next.type != "OPEN_PAR":
-                raise ValueError(
-                    f"[Parser] Expected '(' after if, got {Parser.lexer.next.type}"
-                )
-            Parser.lexer.select_next()
             cond = Parser.parse_bool_expression()
-            if Parser.lexer.next.type != "CLOSE_PAR":
-                raise ValueError(
-                    f"[Parser] Expected ')' after if cond, got {Parser.lexer.next.type}"
-                )
-            Parser.lexer.select_next()
             if Parser.lexer.next.type != "OPEN_IF_BRA":
                 raise ValueError(
                     f"[Parser] Expected 'then', got {Parser.lexer.next.type}"
@@ -1214,14 +1417,12 @@ class Parser:
             while Parser.lexer.next.type == "EOL":
                 Parser.lexer.select_next()
             if_block = Parser.parse_block()
-
             children = [cond, if_block]
             if Parser.lexer.next.type == "ELSE":
                 Parser.lexer.select_next()
                 while Parser.lexer.next.type == "EOL":
                     Parser.lexer.select_next()
                 children.append(Parser.parse_block())
-
             if Parser.lexer.next.type != "CLOSE_BRA":
                 raise ValueError(
                     f"[Parser] Expected 'end' to close if, got {Parser.lexer.next.type}"
@@ -1231,17 +1432,7 @@ class Parser:
 
         if token.type == "WHILE":
             Parser.lexer.select_next()
-            if Parser.lexer.next.type != "OPEN_PAR":
-                raise ValueError(
-                    f"[Parser] Expected '(' after while, got {Parser.lexer.next.type}"
-                )
-            Parser.lexer.select_next()
             cond = Parser.parse_bool_expression()
-            if Parser.lexer.next.type != "CLOSE_PAR":
-                raise ValueError(
-                    f"[Parser] Expected ')' after while cond, got {Parser.lexer.next.type}"
-                )
-            Parser.lexer.select_next()
             if Parser.lexer.next.type != "OPEN_BRA":
                 raise ValueError(
                     f"[Parser] Expected 'do', got {Parser.lexer.next.type}"
@@ -1269,63 +1460,65 @@ class Parser:
             Parser.lexer.select_next()
             return body
 
-        if token.type == "FUNCTION":
-            Parser.lexer.select_next()
-            return Parser.parse_function_dec()
+        if token.type == "VAR":
+            return Parser.parse_var_declaration()
 
         if token.type == "RETURN":
             Parser.lexer.select_next()
-            # 'return' sem expressão (fim de linha / fim de bloco)
-            if Parser.lexer.next.type in ("EOL", "CLOSE_BRA", "ELSE", "EOF"):
-                return Return()
             expr = Parser.parse_bool_expression()
             return Return("return", [expr])
-
-        if token.type == "VAR":
-            Parser.lexer.select_next()
-            if Parser.lexer.next.type != "IDEN":
-                raise ValueError(
-                    f"[Parser] Expected identifier after local, got {Parser.lexer.next.type}"
-                )
-            iden_node = Identifier(Parser.lexer.next.value)
-            Parser.lexer.select_next()
-
-            # Aceita 'local x number', 'local x: number' e 'local x::number'
-            if Parser.lexer.next.type == "COLON":
-                Parser.lexer.select_next()
-                if Parser.lexer.next.type == "COLON":
-                    Parser.lexer.select_next()
-
-            if Parser.lexer.next.type != "TYPE":
-                raise ValueError(
-                    f"[Parser] Expected type after variable name, got {Parser.lexer.next.type}"
-                )
-            var_type = Parser.lexer.next.value
-            Parser.lexer.select_next()
-
-            children = [iden_node]
-            if Parser.lexer.next.type == "ASSIGN":
-                Parser.lexer.select_next()
-                children.append(Parser.parse_bool_expression())
-            return VarDec(var_type, children)
 
         if token.type == "IDEN":
             name = token.value
             Parser.lexer.select_next()
 
-            # Chamada de função como statement: nome(args)
+            # IDEN ( ... )  -> chamada de função como statement
             if Parser.lexer.next.type == "OPEN_PAR":
-                args = Parser._parse_call_args()
+                Parser.lexer.select_next()
+                args = []
+                if Parser.lexer.next.type != "CLOSE_PAR":
+                    args.append(Parser.parse_bool_expression())
+                    while Parser.lexer.next.type == "COMMA":
+                        Parser.lexer.select_next()
+                        args.append(Parser.parse_bool_expression())
+                if Parser.lexer.next.type != "CLOSE_PAR":
+                    raise ValueError(
+                        f"[Parser] Expected ')' to close call to '{name}', "
+                        f"got {Parser.lexer.next.type}"
+                    )
+                Parser.lexer.select_next()
                 return FuncCall(name, args)
 
-            # Atribuição: nome = expr
-            iden_node = Identifier(name)
+            # IDEN . IDEN [. IDEN]* = expr  -> atribuição a campo de struct
+            if Parser.lexer.next.type == "DOT":
+                identifiers = [Identifier(name)]
+                while Parser.lexer.next.type == "DOT":
+                    Parser.lexer.select_next()
+                    if Parser.lexer.next.type != "IDEN":
+                        raise ValueError(
+                            f"[Parser] Expected field name after '.', "
+                            f"got {Parser.lexer.next.type}"
+                        )
+                    identifiers.append(Identifier(Parser.lexer.next.value))
+                    Parser.lexer.select_next()
+
+                if Parser.lexer.next.type != "ASSIGN":
+                    raise ValueError(
+                        f"[Parser] Expected '=' after field access in statement, "
+                        f"got {Parser.lexer.next.type}"
+                    )
+                Parser.lexer.select_next()
+                expr = Parser.parse_bool_expression()
+                return MemberAssignment("=", identifiers + [expr])
+
+            # IDEN = ...    -> atribuição
             if Parser.lexer.next.type != "ASSIGN":
                 raise ValueError(
-                    f"[Parser] Expected '=' or '(' after identifier, got {Parser.lexer.next.type}"
+                    f"[Parser] Expected '=' or '(' after identifier '{name}', "
+                    f"got {Parser.lexer.next.type}"
                 )
             Parser.lexer.select_next()
-            return Assignment("=", [iden_node, Parser.parse_bool_expression()])
+            return Assignment("=", [Identifier(name), Parser.parse_bool_expression()])
 
         raise ValueError(f"[Parser] Unexpected token in statement: {token.type}")
 
@@ -1336,8 +1529,13 @@ class Parser:
             Parser.lexer.select_next()
 
         while Parser.lexer.next.type != "EOF":
-            stmt = Parser.parse_statement()
-            statements.append(stmt)
+            if Parser.lexer.next.type == "FUNC":
+                statements.append(Parser.parse_func_declaration())
+            elif Parser.lexer.next.type == "STRUCT":
+                statements.append(Parser.parse_struct_declaration())
+            else:
+                statements.append(Parser.parse_statement())
+
             if Parser.lexer.next.type == "EOL":
                 while Parser.lexer.next.type == "EOL":
                     Parser.lexer.select_next()
@@ -1373,13 +1571,7 @@ def main():
     tree = Parser.run(code)
 
     st = SymbolTable()
-    Code.reset()
-    FuncTable.reset()
-    tree.generate(st)
-
-    output_filename = os.path.splitext(filename)[0] + ".asm"
-    Code.dump(output_filename)
-    print(f"[Main] Assembly generated: {output_filename}")
+    tree.evaluate(st)
 
 
 if __name__ == "__main__":
