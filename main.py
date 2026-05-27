@@ -1140,7 +1140,10 @@ class Parser:
             )
         Parser.lexer.select_next()
 
-        # Tipo de retorno opcional: ': TYPE'
+        # Tipo de retorno opcional. Aceita:
+        #   ': TYPE'   (com dois-pontos)
+        #   'TYPE'     (estilo Lua-like usado pelo tester: 'function f(x number) number')
+        #   nada       (procedimento, ex: 'function main()')
         return_type = None
         if Parser.lexer.next.type == "COLON":
             Parser.lexer.select_next()
@@ -1148,6 +1151,9 @@ class Parser:
                 raise ValueError(
                     f"[Parser] Expected return type after ':', got {Parser.lexer.next.type}"
                 )
+            return_type = Parser.lexer.next.value
+            Parser.lexer.select_next()
+        elif Parser.lexer.next.type == "TYPE":
             return_type = Parser.lexer.next.value
             Parser.lexer.select_next()
 
